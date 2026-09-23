@@ -26,7 +26,12 @@ def set_cli_process_identity(args: list[str]) -> None:
         # which packaging already generates as ``nanobot.exe``.
         return
     role = args[0] if args and args[0] in _ROLES else None
-    _set_process_title(f"nanobot-{role}" if role else "nanobot")
+    try:
+        _set_process_title(f"nanobot-{role}" if role else "nanobot")
+    except (ImportError, OSError, UnicodeError):
+        # Process naming is diagnostic only. Some platforms expose a truncated argv block
+        # that setproctitle cannot decode when a CLI argument ends mid-codepoint.
+        return
 
 
 def named_executable(executable: str, *, name: str, directory: Path) -> str:

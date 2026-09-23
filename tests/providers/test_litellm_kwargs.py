@@ -369,6 +369,33 @@ async def test_deepseek_v4_pro_uses_responses_api() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deepseek_flash_uses_responses_api() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response())
+    mock_responses = AsyncMock(return_value=_fake_responses_response("from flash"))
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_client_class:
+        client_instance = mock_client_class.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test",
+            default_model="deepseek-flash",
+            spec=find_by_name("deepseek"),
+        )
+        result = await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="deepseek-flash",
+            reasoning_effort="none",
+        )
+
+    assert result.content == "from flash"
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_not_awaited()
+    assert mock_responses.call_args.kwargs["model"] == "deepseek-flash"
+
+
+@pytest.mark.asyncio
 async def test_deepseek_vision_uses_responses_api_with_image_input() -> None:
     mock_chat = AsyncMock(return_value=_fake_chat_response())
     mock_responses = AsyncMock(return_value=_fake_responses_response("vision response"))

@@ -46,6 +46,19 @@ def test_cli_process_identity_keeps_windows_launcher_name(
     assert titles == []
 
 
+def test_cli_process_identity_ignores_unicode_decode_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nanobot.cli.process_identity.os.name", "posix")
+
+    def fail_to_set_title(_: str) -> None:
+        raise UnicodeDecodeError("utf-8", b"\xe4", 0, 1, "unexpected end of data")
+
+    monkeypatch.setattr("nanobot.cli.process_identity._set_process_title", fail_to_set_title)
+
+    set_cli_process_identity(["agent", "-m", "一个较长的中文问题"])
+
+
 def test_legacy_console_entrypoint_still_sets_subcommand_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

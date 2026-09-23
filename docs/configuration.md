@@ -360,7 +360,8 @@ request, while other tools such as `web_fetch` remain available.
 <details>
 <summary><b>DeepSeek native web search</b></summary>
 
-DeepSeek V4 Flash and Pro use DeepSeek's native Responses API. Their provider-hosted web search is
+DeepSeek Flash (`deepseek-flash`) and V4 Pro use DeepSeek's native Responses API. Their
+provider-hosted web search is
 enabled by default because it does not require a separate paid add-on. Turn it off from the
 WebUI provider settings, or with:
 
@@ -377,7 +378,8 @@ WebUI provider settings, or with:
 }
 ```
 
-The switch applies to `deepseek-v4-flash` and `deepseek-v4-pro`; DeepSeek models that remain on
+The switch applies to `deepseek-flash`, its legacy `deepseek-v4-flash` alias, and
+`deepseek-v4-pro`; DeepSeek models that remain on
 Chat Completions cannot use this Responses tool. Native search calls appear in the WebUI activity
 stream, and their opaque output items are preserved for multi-turn Responses state replay.
 
