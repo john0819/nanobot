@@ -1,5 +1,8 @@
 # How to Configure MCP Tools in nanobot
 
+For the project-specific QA knowledge integration, see
+[Connect qa-kb-service over MCP HTTP](connect-qa-knowledge-base.md).
+
 This guide adds an MCP server to nanobot so the agent can use external tools
 through the Model Context Protocol.
 

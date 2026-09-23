@@ -73,6 +73,7 @@ def test_mcp_presets_payload_lists_supported_cards(tmp_path, monkeypatch: pytest
         "github",
         "figma",
         "context7",
+        "qa-knowledge-base",
         "firecrawl",
         "parallel-search",
         "exa",
@@ -98,6 +99,29 @@ def test_mcp_presets_payload_lists_supported_cards(tmp_path, monkeypatch: pytest
     assert manifest["install"]["strategy"] == "config"
     assert manifest["remove"]["verification"] == ["config_absent"]
     assert manifest["trust"]["review_status"] == "builtin_preset"
+
+
+def test_qa_knowledge_base_preset_uses_oauth_and_search_only(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_config(tmp_path, monkeypatch)
+
+    payload = mcp_presets_action("enable", {"name": ["qa-knowledge-base"]})
+
+    row = next(item for item in payload["presets"] if item["name"] == "qa-knowledge-base")
+    assert row["transport"] == "streamableHttp"
+    assert row["auth"] == "oauth"
+    assert row["status"] == "authorization_required"
+    assert row["enabled_tools"] == ["search"]
+    assert "127.0.0.1/32" in row["note"]
+
+    server = load_config().tools.mcp_servers["qa-knowledge-base"]
+    assert server.type == "streamableHttp"
+    assert server.auth == "oauth"
+    assert server.url == "http://127.0.0.1:8910/mcp"
+    assert server.tool_timeout == 30
+    assert server.enabled_tools == ["search"]
 
 
 def test_agent_plugin_reuses_mcp_catalog_and_runtime_action(

@@ -181,6 +181,31 @@ MCP_PRESETS: tuple[McpPreset, ...] = (
         note="Works without a key for basic public docs; add a key for higher limits or private docs.",
     ),
     McpPreset(
+        name="qa-knowledge-base",
+        display_name="QA Knowledge Base",
+        category="docs",
+        description="Search governed QA and exchange-domain knowledge through qa-kb-service.",
+        docs_url=(
+            "https://github.com/john0819/qa-kb-service/blob/main/docs/api/mcp-api.md"
+        ),
+        transport="streamableHttp",
+        install_supported=True,
+        brand_domain="github.com",
+        brand_color="#2563EB",
+        requires="Running qa-kb-service and an OAuth identity provider",
+        server=MCPServerConfig(
+            type="streamableHttp",
+            auth="oauth",
+            url="http://127.0.0.1:8910/mcp",
+            tool_timeout=30,
+            enabled_tools=["search"],
+        ),
+        note=(
+            "The local endpoint requires 127.0.0.1/32 in tools.ssrfWhitelist. "
+            "Replace the URL with the deployment's HTTPS MCP endpoint in production."
+        ),
+    ),
+    McpPreset(
         name="firecrawl",
         display_name="Firecrawl",
         category="web",
