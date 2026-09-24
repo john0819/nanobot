@@ -102,6 +102,7 @@ tmp/
 temp/
 *.tmp
 exp/
+evals/qa-agent/reports/
 .playwright-mcp/
 bridge/node_modules/
 webui/.verify-*
