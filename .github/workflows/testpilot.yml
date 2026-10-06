@@ -1,0 +1,53 @@
+name: TestPilot evidence gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'feat/testpilot-*']
+    paths: ['testpilot/**', 'tests/testpilot/**', 'pyproject.toml', '.github/workflows/testpilot.yml']
+  pull_request:
+    paths: ['testpilot/**', 'tests/testpilot/**', 'pyproject.toml', '.github/workflows/testpilot.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install development dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Focused lint and strict type check
+        run: |
+          ruff check testpilot tests/testpilot
+          basedpyright testpilot
+      - name: Evidence contracts and real execution
+        run: python -m pytest tests/testpilot -q
+      - name: nanobot and QA integration compatibility
+        run: >-
+          python -m pytest tests/agent/test_runner_core.py
+          tests/agent/test_runner_tool_execution.py tests/agent/test_runner_hooks.py
+          tests/agent/test_builtin_qa_knowledge_skill.py tests/evals/test_qa_agent_evaluator.py -q
+      - name: Real fixture demos and unsupported claim rejection
+        run: |
+          python -m testpilot --mode healthy
+          python -m testpilot --mode retry-write-bug
+          if python -m testpilot --mode retry-write-bug --claim-all-passed; then
+            echo "Expected evidence gate rejection"
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 2
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testpilot-real-execution
+          path: .local/testpilot/
+          include-hidden-files: true
+          retention-days: 7

@@ -129,6 +129,7 @@ allow-direct-references = true
 [tool.hatch.build]
 include = [
     "nanobot/**/*.py",
+    "testpilot/**/*.py",
     "nanobot/templates/**/*.md",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
@@ -143,7 +144,7 @@ artifacts = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["nanobot", "testpilot"]
 exclude = ["nanobot/channels/*/tests/**"]
 
 [tool.hatch.build.targets.wheel.sources]
@@ -152,6 +153,9 @@ exclude = ["nanobot/channels/*/tests/**"]
 [tool.hatch.build.targets.sdist]
 include = [
     "nanobot/",
+    "testpilot/",
+    "upstream.lock",
+    "requirements-testpilot-py313.lock",
     "nanobot/web/dist/",
     "hatch_build.py",
     "README.md",
@@ -170,7 +174,7 @@ select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 
 [tool.basedpyright]
-include = ["nanobot"]
+include = ["nanobot", "testpilot"]
 exclude = ["**/tests"]
 typeCheckingMode = "strict"
 pythonVersion = "3.11"

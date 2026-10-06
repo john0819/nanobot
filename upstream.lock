@@ -1,0 +1,27 @@
+{
+  "lock_version": 1,
+  "upstream_repository": "https://github.com/HKUDS/nanobot.git",
+  "upstream_checkout_base_sha": "ecf6519ef1fc1f8af30d593ebbcc6f6b15a28c52",
+  "base_resolution": "parent of first local QA MCP commit 326b826f; no upstream remote-tracking ref available locally",
+  "fork_repository": "https://github.com/john0819/nanobot.git",
+  "fork_baseline_sha": "23f1a0844599ae8c11b33f2190caa6d63cb044ee",
+  "license": "MIT; preserve LICENSE and THIRD_PARTY_NOTICES.md",
+  "python_verified": "3.13.4",
+  "platform_verified": "Darwin",
+  "dependency_snapshot": {
+    "nanobot-ai": "0.3.5",
+    "pytest": "9.1.1",
+    "pydantic": "2.13.5",
+    "defusedxml": "0.7.1",
+    "ruff": "0.16.8",
+    "basedpyright": "1.40.1",
+    "httpx": "0.28.1",
+    "loguru": "0.7.3",
+    "mcp": "1.30.0"
+  },
+  "dependency_lock": "requirements-testpilot-py313.lock",
+  "notes": [
+    "No upstream update or remote fetch was performed.",
+    "Fixture target is a worktree snapshot; source and oracle bytes are separately hashed."
+  ]
+}
