@@ -156,6 +156,8 @@ include = [
     "testpilot/",
     "upstream.lock",
     "requirements-testpilot-py313.lock",
+    "runner/",
+    "scripts/testpilot_live_smoke.py",
     "nanobot/web/dist/",
     "hatch_build.py",
     "README.md",

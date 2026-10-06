@@ -1,8 +1,9 @@
 ## This fork: TestPilot 智能测试 Agent
 
 基于 nanobot 二开，已有 qa-kb-service RAG/MCP 接入，新增独立 `testpilot` 扩展包。
-当前增量实现 **真实 AgentRunner → 固定网关测试 → JUnit/日志 → 证据闸门 → 结构化报告**。
-包含真实 pytest 执行、seeded defect 和虚假成功声明阻断；企业持久恢复与隔离 Runner 仍在开发计划中。
+当前增量实现 **nanobot Task API → AgentRunner → 独立隔离 Runner → HTTP 网关测试 → JUnit/日志 → 可信报告**。
+已通过脚本 Provider 和真实 DeepSeek 模型的本地启动验证，包含 seeded defect、虚假成功声明阻断和容器取消清理。
+任务服务目前是回环地址上的开发部署；PostgreSQL 持久恢复与企业认证在下一阶段实现。
 
 - [二开说明、运行与阶段清单](docs/testpilot/README.md)
 - [上游源码审计](docs/upstream-audit.md)

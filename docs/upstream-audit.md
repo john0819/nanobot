@@ -33,6 +33,8 @@
 ## 发布边界与补丁
 
 本次没有修改 `nanobot/agent/loop.py`、`runner.py`、Hook 或 ToolRegistry。
+第二批增量只在 `nanobot/cli/commands.py` 增加独立 `testpilot` Typer 子命令注册；
+Task API、CLI 实现、Runner 与协议均在扩展目录，Provider 复用既有配置工厂。
 `AgentRunResult.final_content` 只作为私有报告候选输入；`run_task()` 返回的唯一结果是
 `build_report()` 生成的可信结构化报告或 NEEDS_REVIEW 部分报告。
 没有自由发送、任意文件写、shell 或 MCP 工具可绕过此任务目录的发布边界。

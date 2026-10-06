@@ -55,7 +55,7 @@ class ExecutionRecord(Contract):
     junit_hash: str | None
     log_hash: str
     observed_at: str
-    source_system: Literal["trusted-local-fixture"] = "trusted-local-fixture"
+    source_system: Literal["trusted-local-fixture", "isolated-container-fixture"] = "trusted-local-fixture"
 
 
 class Claim(Contract):

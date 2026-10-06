@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'feat/testpilot-*']
-    paths: ['testpilot/**', 'tests/testpilot/**', 'pyproject.toml', '.github/workflows/testpilot.yml']
+    paths: ['testpilot/**', 'runner/**', 'scripts/testpilot_live_smoke.py', 'nanobot/cli/commands.py', 'tests/testpilot/**', 'pyproject.toml', '.github/workflows/testpilot.yml']
   pull_request:
-    paths: ['testpilot/**', 'tests/testpilot/**', 'pyproject.toml', '.github/workflows/testpilot.yml']
+    paths: ['testpilot/**', 'runner/**', 'scripts/testpilot_live_smoke.py', 'nanobot/cli/commands.py', 'tests/testpilot/**', 'pyproject.toml', '.github/workflows/testpilot.yml']
 
 permissions:
   contents: read
@@ -24,8 +24,12 @@ jobs:
         run: python -m pip install -e '.[dev]'
       - name: Focused lint and strict type check
         run: |
-          ruff check testpilot tests/testpilot
+          ruff check testpilot runner tests/testpilot scripts/testpilot_live_smoke.py
           basedpyright testpilot
+      - name: Build fixed isolated Runner
+        run: |
+          docker build -f runner/Dockerfile -t testpilot-runner:dev .
+          echo "TESTPILOT_RUNNER_IMAGE=$(docker image inspect --format '{{.Id}}' testpilot-runner:dev)" >> "$GITHUB_ENV"
       - name: Evidence contracts and real execution
         run: python -m pytest tests/testpilot -q
       - name: nanobot and QA integration compatibility
@@ -35,6 +39,7 @@ jobs:
           tests/agent/test_builtin_qa_knowledge_skill.py tests/evals/test_qa_agent_evaluator.py -q
       - name: Real fixture demos and unsupported claim rejection
         run: |
+          python scripts/testpilot_live_smoke.py
           python -m testpilot --mode healthy
           python -m testpilot --mode retry-write-bug
           if python -m testpilot --mode retry-write-bug --claim-all-passed; then
@@ -48,6 +53,8 @@ jobs:
         if: always()
         with:
           name: testpilot-real-execution
-          path: .local/testpilot/
+          path: |
+            .local/testpilot/
+            .local/testpilot-live-smoke/
           include-hidden-files: true
           retention-days: 7

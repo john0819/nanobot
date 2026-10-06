@@ -121,7 +121,9 @@ def build_report(
         "claims": statuses, "validation_gaps": gaps,
         "limitations": ["仅覆盖固定网关策略 fixture，不代表企业项目回归或代码覆盖率。",
                         "目标为工作树快照：commit_sha 记录 fork 基线，suite_hash 绑定实际源码与断言。",
-                        "本地执行器仅执行审核过的固定源码；不提供生成代码隔离或持久恢复。",
+                        ("独立隔离容器执行固定 HTTP suite；不开放生成代码，也不提供持久任务恢复。"
+                         if record and record.source_system == "isolated-container-fixture"
+                         else "本地执行器仅执行审核过的固定源码；不提供生成代码隔离或持久恢复。"),
                         "未验证真实 LLM 自主规划效果，RAG 本次未参与执行证据判定。"],
         "artifact_refs": [h for h in (record.junit_hash, record.log_hash) if h] if record else [],
         "next_actions": ["审查证据缺口，补充验证后重新生成报告。"] if gaps else [],

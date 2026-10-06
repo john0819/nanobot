@@ -10,7 +10,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.utils.llm_runtime import LLMRuntime
 from testpilot.domain import ReportCandidate
 from testpilot.evidence import build_report, check_execution
-from testpilot.execution import FixedFixtureExecutor
+from testpilot.executor_contract import FixtureExecutor
 
 
 async def retain_raw_history(
@@ -20,7 +20,7 @@ async def retain_raw_history(
 
 
 class FixtureTool(Tool):
-    def __init__(self, executor: FixedFixtureExecutor) -> None:
+    def __init__(self, executor: FixtureExecutor) -> None:
         self.executor = executor
 
     @property
@@ -50,7 +50,7 @@ class FixtureTool(Tool):
 
 
 async def run_task(
-    executor: FixedFixtureExecutor, provider: LLMProvider, model: str,
+    executor: FixtureExecutor, provider: LLMProvider, model: str,
 ) -> dict[str, object]:
     """One bounded fragment. Raw model final content never crosses publication boundary."""
     tools = ToolRegistry()
@@ -71,8 +71,10 @@ async def run_task(
         finalize_on_max_iterations=False,
         consolidate_history=retain_raw_history,
     ))
-    return build_report(
+    report = build_report(
         task_id=executor.task_id, target=executor.target, record=executor.record,
         store=executor.store, candidate_json=result.final_content,
         runner_stop_reason=result.stop_reason,
     )
+    report["model_rounds"] = len(result.round_usages)
+    return report

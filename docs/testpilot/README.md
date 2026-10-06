@@ -8,10 +8,11 @@
 
 ```mermaid
 flowchart LR
-  P[脚本 Provider / 可注入 LLMProvider] --> N[真实 nanobot AgentRunner]
+  API[nanobot testpilot serve / Task API] --> N[真实 nanobot AgentRunner]
+  P[脚本 Provider / 已配置真实模型] --> N
   N --> T[无参数固定网关工具]
-  T --> E[受信本地 Fixture Executor]
-  E --> J[真实 pytest / JUnit / 日志]
+  T --> E[固定镜像隔离 Container Runner]
+  E --> J[真实 HTTP Gateway + Upstream / pytest / JUnit / 日志]
   J --> A[内容 hash 与执行记录]
   A --> N
   N --> C[私有结构化候选]
@@ -25,13 +26,25 @@ flowchart LR
 - `artifacts.py`：内容寻址、大小限制、hash 读回验证、拒绝路径逃逸和 symlink。
 - `junit.py`：安全 XML、嵌套 suite、按 testcase 计算互斥计数、planned 守恒。
 - `evidence.py`：Scope/hash/终态/exit code/证据引用/计数/声明闸门。
-- `nanobot_adapter.py`：唯一上游耦合点，每任务独立工具表，不直接发布模型最终文本。
-- 固定 oracle 验证读重试、写不重试、路由优先级和限流，支持写重试 seeded defect。
+- `nanobot_adapter.py`：唯一 Runner/Tool 适配点；CLI 另复用 Provider 工厂，每任务独立工具表，不直接发布模型最终文本。
+- `container_runner.py`：固定不可变镜像、非 root、只读根文件系统、network none、资源限额、取消后确认清理。
+- `task_api.py`：开发 Bearer 认证、异步任务、主体隔离、请求幂等、容量限制、状态/报告/产物/取消 API。
+- `runner/`：独立执行镜像；运行前校验源码和独立 oracle hash，Docker socket/密钥不进入容器。
+- 固定 oracle 通过真实 HTTP 请求验证读重试、写不重试、路由优先级和限流；Gateway 对 Upstream 也发起真实请求。
 
-这是 **M0 + M1 的本地执行/报告部分 + 模块 E 的首个可运行子集**。
-不是完整 M1：没有任务 API、HTTP 被测 gateway 或隔离 Runner 服务。
+这是 **M0 + M1 本地固定目标纵切 + 模块 E 的首个可运行子集**。
+已实现 Task API、HTTP 被测 gateway 和独立容器 Runner；目标仍是工作树固定 fixture，
+尚未接入企业 Git commit manifest、PostgreSQL 任务事实源或 OIDC。
 
 ## 运行
+
+推荐使用 [启动与验证 Runbook](runbook.md) 启动 `nanobot testpilot serve`。
+运行前构建 `runner/Dockerfile`，从环境提供随机开发 Token，并以不可变镜像 ID 准入。
+带 `--config <nanobot配置>` 时复用既有 Provider；不带时使用脚本 Provider。
+实际验证脚本为 `scripts/testpilot_live_smoke.py`，会启动 nanobot 进程、提交两条任务、
+检查报告/幂等/产物/容器残留并停止服务。脚本 Provider 和真实模型的结果分别记录。
+
+旧的受信宿主 fixture 演示仍可在无 Docker 时运行：
 
 已有环境直接执行以下命令，不需要模型 Key、Docker 或 RAG 服务在线：
 
@@ -53,8 +66,9 @@ flowchart LR
 `requirements-testpilot-py313.lock`。它是当前 macOS/Python 3.13 环境快照，尚未验证跨平台
 重装，也不是企业发布所需的镜像 digest/全平台 lock。
 
-`run_task(executor, provider, model)` 可以注入真实 `LLMProvider`，但此批验证使用
-`ScriptedProvider`，并没有调用付费模型。全局聊天和 RAG OAuth 配置不受影响。
+`run_task(executor, provider, model)` 可以注入真实 `LLMProvider`。第二批已使用现有
+`deepseek-flash` 成功验证两条任务；仅为 smoke，不是 held-out 模型准确率评估。
+全局聊天和 RAG OAuth 配置不受影响。
 
 ## 验证与阶段清单
 
@@ -62,10 +76,12 @@ flowchart LR
 
 - [x] M0：实际 SHA/许可证/依赖快照/源码签名审计。
 - [x] 原 AgentRunner 工具协议复用，非另写 Agent Loop。
-- [x] M1 子集：真实固定 pytest、JUnit、日志和报告往返。
+- [x] M1 固定目标纵切：Task API → AgentRunner → 独立 Runner → 真实 HTTP pytest/JUnit → 报告。
 - [x] 模块 E 子集：无执行、假成功、目标漂移、hash 篡改、计数与证据引用负面验证。
 - [x] GitHub 展示入口与独立 TestPilot CI。
-- [ ] M1：Task API、固定目标 Git source manifest、HTTP gateway fixture、独立隔离 Runner。
+- [x] 启动真实 nanobot Task API，脚本 Provider 和 DeepSeek 模型分别验证正常/缺陷任务。
+- [x] 容器隔离探针、取消后确认移除、重复/并发取消和禁止自动重发。
+- [ ] M1 企业目标接入：Git commit source manifest、服务端身份/环境快照、企业 Runner 契约。
 - [ ] M2：PostgreSQL 租约/fencing、operation/attempt/job、checkpoint、outbox、UNKNOWN 对账。
 - [ ] M3：企业授权/审批、取消/进程树确认、外部幂等、rerun 与首轮失败保留、完整 Evidence 类型。
 - [ ] M4：task 级预算、Plan/Progress Guard/上下文、受治理的按需 RAG、真实模型评测。
@@ -81,3 +97,11 @@ OAuth introspection 或受信 stdio 配置获得，模型不能传 tenant/ACL pr
 当前证据任务只有固定 fixture 工具；尚未把 RAG 工具注册进该任务目录。
 后续先完成 task-scoped 的 MCP 治理再接入，而不是直接开放 nanobot 所有工具。
 知识引用支撑“规范要求写请求不能重试”；completed run + JUnit 才能支撑“本次写请求测试失败”。
+
+## 当前任务服务的生命周期
+
+任务状态与 Idempotency-Key 目前只保存在进程内，并发上限 2、最多保留 100 个任务；超限 429。
+进程内同主体同 key 同请求返回原 task，不同请求 409；Runner 同实例只执行一次 operation。
+停止服务会取消活跃任务并确认容器清理。重启后不能从 API 恢复旧 task 查询，不能把它部署为共享任务服务。
+报告/产物/operation 调查记录保留在本地文件中，但它们不是 PostgreSQL 任务账本。
+跨进程幂等、crash recovery、UNKNOWN 对账属于 M2，未完成前不声称 exactly-once。

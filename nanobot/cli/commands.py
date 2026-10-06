@@ -97,6 +97,11 @@ app = typer.Typer(
 
 console = Console()
 
+# The fork's enterprise extension stays outside upstream AgentRunner/Loop.
+from testpilot.cli import app as testpilot_app  # noqa: E402
+
+app.add_typer(testpilot_app, name="testpilot")
+
 def version_callback(value: bool):
     if value:
         console.print(f"{__logo__} nanobot v{__version__}")

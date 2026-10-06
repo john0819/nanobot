@@ -1,0 +1,8 @@
+**
+!testpilot/
+!testpilot/fixtures/
+!testpilot/fixtures/gateway.py
+!testpilot/fixtures/suite.py
+!runner/
+!runner/Dockerfile
+!runner/entry.py
