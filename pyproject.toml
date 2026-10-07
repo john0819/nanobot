@@ -63,6 +63,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+testpilot = [
+    "aiohttp>=3.9.0,<4.0.0",
+    "psycopg[binary]==3.2.13",
+]
 api = [
     "aiohttp>=3.9.0,<4.0.0",
 ]
@@ -91,6 +95,7 @@ olostep = [
     "olostep>=0.1.0; python_version < '3.14'",
 ]
 dev = [
+    "psycopg[binary]==3.2.13",
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
     "aiohttp>=3.9.0,<4.0.0",
@@ -130,6 +135,7 @@ allow-direct-references = true
 include = [
     "nanobot/**/*.py",
     "testpilot/**/*.py",
+    "testpilot/storage/*.sql",
     "nanobot/templates/**/*.md",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
@@ -158,6 +164,8 @@ include = [
     "requirements-testpilot-py313.lock",
     "runner/",
     "scripts/testpilot_live_smoke.py",
+    "scripts/testpilot_crash_smoke.py",
+    "testpilot-compose.yml",
     "nanobot/web/dist/",
     "hatch_build.py",
     "README.md",

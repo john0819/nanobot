@@ -13,11 +13,11 @@ from testpilot.domain import ExecutionRecord, Target
 from testpilot.execution import EXPECTED_CASES, FixtureMode, fixture_target
 
 
-def container_target(commit_sha: str, mode: FixtureMode, image: str) -> Target:
+def container_target(commit_sha: str, mode: FixtureMode, image: str, tenant_id: str = "novax-demo") -> Target:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise ValueError("Runner requires an immutable local image ID, not a tag")
     target = fixture_target(commit_sha, mode)
-    return target.model_copy(update={"env_snapshot_id": f"isolated-container-fixture:{image}:{mode}"})
+    return target.model_copy(update={"env_snapshot_id": f"isolated-container-fixture:{image}:{mode}", "tenant_id": tenant_id})
 
 
 class ContainerFixtureExecutor:
@@ -32,7 +32,7 @@ class ContainerFixtureExecutor:
         self, store: ArtifactStore, task_id: str, target: Target, mode: FixtureMode,
         image: str, scratch: Path,
     ) -> None:
-        if mode not in {"healthy", "retry-write-bug"} or target != container_target(target.commit_sha, mode, image):
+        if mode not in {"healthy", "retry-write-bug"} or target != container_target(target.commit_sha, mode, image, target.tenant_id):
             raise ValueError("Runner target does not match admission")
         self.store, self.task_id, self.target = store, task_id, target
         self.mode: FixtureMode = mode
@@ -84,7 +84,7 @@ class ContainerFixtureExecutor:
             return self.record
 
     async def _execute(self) -> ExecutionRecord:
-        if self.target != container_target(self.target.commit_sha, self.mode, self.image):
+        if self.target != container_target(self.target.commit_sha, self.mode, self.image, self.target.tenant_id):
             raise ValueError("Runner source drift before dispatch")
         with TemporaryDirectory(prefix="job-", dir=self.scratch) as directory:
             root = Path(directory)

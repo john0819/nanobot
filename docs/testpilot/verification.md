@@ -1,5 +1,55 @@
 # TestPilot 验证记录
 
+## 第三批：PostgreSQL 账本、租约与原 Job 恢复
+
+日期：2026-10-07。独立 `testpilot-ledger-dev` PostgreSQL 17.11 数据库，随机开发凭证只保存在
+Git 忽略、0600 的本地环境文件；没有连接或改写 qa-kb-service 数据库。
+
+| 检查 | 实际结果 |
+|---|---|
+| TestPilot 全集，实际 PG + Docker（无 skip） | **66 passed**，7.49 秒 |
+| 最近 Runner/QA 兼容集 | **66 passed** |
+| 扩展、测试、故障脚本 Ruff / strict BasedPyright | All checks passed / 0 errors |
+| SQL migration 实际应用与重复调用 | 幂等成功，校验和锁定，复合 FK 拒绝错 run/task 关系 |
+| request_dedup 与 quota 并发事务 | 5 个同请求只产生一个 task；不同内容 409；跨 actor/tenant 不能读取 |
+| SKIP LOCKED / 过期租约 / CAS | 同 task 两个竞争 Worker 只一个领取；旧 epoch 禁止 intent/result/checkpoint/budget/finish |
+| 任务模型主循环预算跨恢复 | 使用量保留，超过 4 轮被拒绝 |
+| 丢 ACK / result 未提交 / 原 Job 已完成 | 原 Job 对账成功；external ID 相同；Docker server Job 数量=1 |
+| 未知写、Docker Job 不存在 | 不创建新 Job；UNKNOWN；取消也不能伪报已清理 |
+| 真实 Docker mode 与目标不同 | 拒绝采纳结果，UNKNOWN；没有“环境一致”的自报假证据 |
+| API 重新启动 | 原 task/key/report/artifacts 可查询；篡改已发布证据后 report 409 |
+| PG 不可用 | HTTP 准入 503；正常启动在 readiness 校验阶段失败，无内存降级 |
+| wheel build | 包含 `testpilot/storage/001_ledger.sql` 和 PG adapter（WebUI build 跳过） |
+
+本批 13 个新测试与前批 53 个测试合并。基础设施合同由脚本 Provider 驱动，Docker HTTP Gateway、
+真实 pytest、JUnit、PG 事务均真实执行；本批没有新增真实 LLM 质量评测结果。
+前批 DeepSeek smoke 记录保留，不能把此类 fault test 当成模型自主规划评测。
+
+### 实际进程 kill/restart
+
+运行 `scripts/testpilot_crash_smoke.py`，真实启动 `python -m nanobot testpilot serve --durable`，
+观察到 Docker Job 后 SIGKILL，确认 PG operation 尚为 **DISPATCHING**，再启动另一 nanobot 服务。
+实测结果：
+
+- `task_id=task_8b380d97cb3d492cac387d301ac56578`
+- `operation_id=op_3e2b23316e8c4c29a94f852b953601f6`
+- `external_run_id=59e66fd687a360cabfe8563bfa8335382976756729477cf2f2db1bc1b456e7ec`
+- 新旧报告指向同一 Docker Job；Docker server 按 operation label 统计 **1 个**，不是只数 Agent trace。
+- lease_epoch **1 → 2**，累计主循环模型预算 **3/4**，重新请求原 key 返回原 task。
+- 恢复后 report_validated=true、quality_verdict=FAIL，可信统计 **3 PASS / 1 FAIL / 0 SKIP / 0 not_run**。
+
+完整本地 JSON 结果位于 `.local/testpilot-crash-smoke/session_*/summary.json`，对应前后启动日志同目录。
+脚本关闭服务并清理自己的已提交 Job；PG 数据保留供检查。
+
+### 范围与未完成项
+
+已验证固定 suite 的安全恢复首个闭环，未完成整个 M2/F01–F05/F11–F13 矩阵。
+恢复对齐原 target 和可信 operation 事实，重新建立 bounded fragment；未恢复完整 Plan/Provider continuation。
+四轮计数约束主循环，Provider 内部有限重试/长度恢复的实际 API 请求数和 token/费用预算待 M4。
+长 Job 当前占用 Worker 等待槽，尚未实现独立 Scheduler/Reconciler 和资源等待释放。
+PG outbox 原子写入，但外部 relay/SSE 不在本批范围。
+产物仍是同一持久文件目录，Docker Job 需同一 daemon；S3、多机、OIDC、GC 与真实企业 Adapter 待后续。
+
 ## 第二批：Task API、HTTP fixture、独立隔离 Runner
 
 日期：2026-10-06。实际启动 Docker Desktop，并通过真实 `python -m nanobot testpilot serve`

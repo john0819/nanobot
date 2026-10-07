@@ -3,6 +3,7 @@
 import json
 from typing import Any
 
+from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -11,6 +12,7 @@ from nanobot.utils.llm_runtime import LLMRuntime
 from testpilot.domain import ReportCandidate
 from testpilot.evidence import build_report, check_execution
 from testpilot.executor_contract import FixtureExecutor
+from testpilot.runtime_contracts import RunControls
 
 
 async def retain_raw_history(
@@ -51,10 +53,17 @@ class FixtureTool(Tool):
 
 async def run_task(
     executor: FixtureExecutor, provider: LLMProvider, model: str,
+    *, controls: RunControls | None = None,
 ) -> dict[str, object]:
     """One bounded fragment. Raw model final content never crosses publication boundary."""
     tools = ToolRegistry()
     tools.register(FixtureTool(executor))
+
+    class DurableGuard(AgentHook):
+        async def before_iteration(self, context: AgentHookContext) -> None:
+            if controls is not None:
+                await controls.before_model()
+
     result = await AgentRunner().run(AgentRunSpec(
         initial_messages=[
             {"role": "system", "content": (
@@ -66,10 +75,12 @@ async def run_task(
             {"role": "user", "content": f"Validate gateway fixture for task {executor.task_id}."},
         ], tools=tools,
         runtime=LLMRuntime.capture(provider, model, context_window_tokens=32768),
-        max_iterations=4, max_tool_result_chars=16000,
+        max_iterations=controls.max_iterations if controls else 4, max_tool_result_chars=16000,
         session_key=f"testpilot:{executor.task_id}", concurrent_tools=False,
         finalize_on_max_iterations=False,
         consolidate_history=retain_raw_history,
+        checkpoint_callback=controls.checkpoint if controls else None,
+        hook=DurableGuard(reraise=True) if controls else None,
     ))
     report = build_report(
         task_id=executor.task_id, target=executor.target, record=executor.record,

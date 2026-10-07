@@ -1,8 +1,10 @@
 """Content-addressed local artifacts; readback verifies bytes every time."""
 
 import hashlib
+import os
 import re
 from pathlib import Path
+from uuid import uuid4
 
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 
@@ -29,12 +31,25 @@ class ArtifactStore:
             raise ValueError("artifact exceeds size limit")
         content_hash = digest(content)
         path = self._path(content_hash)
+        temporary = self.root / (".pending-" + uuid4().hex)
         try:
-            with path.open("xb") as stream:
+            with temporary.open("xb") as stream:
                 stream.write(content)
-        except FileExistsError:
-            if self.read(content_hash) != content:
-                raise ValueError("artifact collision or corruption") from None
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)  # Publish complete bytes atomically without replacing immutable content.
+            except FileExistsError:
+                if self.read(content_hash) != content:
+                    raise ValueError("artifact collision or corruption") from None
+            if os.name != "nt":
+                descriptor = os.open(self.root, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
         return content_hash
 
     def read(self, content_hash: str) -> bytes:

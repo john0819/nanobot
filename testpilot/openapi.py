@@ -1,7 +1,7 @@
 """Versioned local API contract; identity never appears in model task input."""
 
 
-def document() -> dict[str, object]:
+def document(durable: bool = False) -> dict[str, object]:
     from testpilot.task_api import TaskRequest
 
     json_task: dict[str, object] = {"application/json": {"schema": {"$ref": "#/components/schemas/TaskSnapshot"}}}
@@ -12,11 +12,18 @@ def document() -> dict[str, object]:
         return {"description": description, "content": content}
 
     return {
-        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.2.0",
-                                     "description": "Loopback development only. In-memory task state; no durable recovery."},
+        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.3.0" if durable else "0.2.0",
+                                     "description": "PostgreSQL task/operation/lease/event ledger; retained Job reconciliation." if durable else "Loopback development only. In-memory task state; no durable recovery."},
         "servers": [{"url": "http://127.0.0.1:8920"}],
         "security": [{"LocalBearer": []}],
         "paths": {
+            **({
+                "/health/ready": {"get": {"security": [], "responses": {"200": {"description": "PG schema ready"}, "503": error}}},
+                "/v1/tasks/{task_id}/events": {"get": {
+                    "parameters": [task_id, {"name": "after", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}}],
+                    "responses": {"200": response("Scoped durable events ordered by sequence", {"application/json": {"schema": {"type": "object", "required": ["events"]}}}), "401": error, "404": error, "422": error, "503": error},
+                }},
+            } if durable else {}),
             "/health/live": {"get": {"security": [], "responses": {"200": {"description": "Process healthy"}}}},
             "/openapi.json": {"get": {"responses": {"200": {"description": "OpenAPI contract"}, "401": error}}},
             "/v1/tasks": {"post": {
@@ -34,7 +41,9 @@ def document() -> dict[str, object]:
                     "schema": {"type": "object", "required": ["task_id", "report_validated", "quality_verdict", "validation_gaps"]}}}),
                 "401": error, "404": error, "409": error}}},
             "/v1/tasks/{task_id}/cancel": {"post": {"parameters": [task_id], "responses": {
-                "200": response("Cancellation resolved or terminal state unchanged"), "401": error, "404": error}}},
+                "200": response("Cancellation resolved or terminal state unchanged"),
+                **({"202": response("Cancellation intent persisted; query until cleanup is confirmed")} if durable else {}),
+                "401": error, "404": error}}},
             "/v1/tasks/{task_id}/artifacts/{hash}": {"get": {
                 "parameters": [task_id, {"name": "hash", "in": "path", "required": True,
                                         "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}],
@@ -46,10 +55,12 @@ def document() -> dict[str, object]:
             "securitySchemes": {"LocalBearer": {"type": "http", "scheme": "bearer"}},
             "schemas": {
                 "TaskRequest": TaskRequest.model_json_schema(),
-                "TaskSnapshot": {"type": "object", "required": ["task_id", "state", "mode", "created_at", "error", "report_ready", "operation_id"],
+                "TaskSnapshot": {"type": "object", "required": ["task_id", "state", "mode", "created_at", "error", "report_ready", "operation_id"] + (["run_id", "lease_epoch", "model_rounds"] if durable else []),
                                  "properties": {
+                                     **({"run_id": {"type": "string"}, "lease_epoch": {"type": "integer", "minimum": 0},
+                                         "model_rounds": {"type": "integer", "minimum": 0, "maximum": 4}} if durable else {}),
                                      "task_id": {"type": "string"},
-                                     "state": {"enum": ["QUEUED", "RUNNING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]},
+                                     "state": {"enum": ["QUEUED", "RUNNING", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]},
                                      "mode": {"enum": ["healthy", "retry-write-bug"]},
                                      "created_at": {"type": "string", "format": "date-time"},
                                      "error": {"type": ["string", "null"]}, "report_ready": {"type": "boolean"},

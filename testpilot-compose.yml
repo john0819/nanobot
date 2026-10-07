@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: testpilot
+      POSTGRES_USER: testpilot
+      POSTGRES_PASSWORD: ${TESTPILOT_POSTGRES_PASSWORD:?Set a development PostgreSQL password}
+    ports:
+      - "127.0.0.1:${TESTPILOT_POSTGRES_PORT:-8943}:5432"
+    volumes:
+      - testpilot_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testpilot -d testpilot"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+volumes:
+  testpilot_pg:

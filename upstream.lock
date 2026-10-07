@@ -17,7 +17,9 @@
     "basedpyright": "1.40.1",
     "httpx": "0.28.1",
     "loguru": "0.7.3",
-    "mcp": "1.30.0"
+    "mcp": "1.30.0",
+    "psycopg": "3.2.13",
+    "psycopg-binary": "3.2.13"
   },
   "dependency_lock": "requirements-testpilot-py313.lock",
   "notes": [

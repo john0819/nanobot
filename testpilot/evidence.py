@@ -110,6 +110,7 @@ def build_report(
         "report_validated": not gaps, "quality_verdict": verdict,
         "target": target.model_dump(), "scope": list(record.expected_cases) if record else [],
         "run_id": record.run_id if record else None,
+        "external_run_id": record.external_run_id if record else None,
         "operation_id": record.operation_id if record else None,
         "completed_actions": ["fixed_fixture_pytest"] if parsed else [],
         "test_summary": ({**counts.model_dump(), "executed": counts.executed,

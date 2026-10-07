@@ -29,16 +29,21 @@ flowchart LR
 - `nanobot_adapter.py`：唯一 Runner/Tool 适配点；CLI 另复用 Provider 工厂，每任务独立工具表，不直接发布模型最终文本。
 - `container_runner.py`：固定不可变镜像、非 root、只读根文件系统、network none、资源限额、取消后确认清理。
 - `task_api.py`：开发 Bearer 认证、异步任务、主体隔离、请求幂等、容量限制、状态/报告/产物/取消 API。
+- `storage/postgres.py` / `storage/001_ledger.sql`：PG Task/Run/Operation/Attempt、租约、幂等、事件/outbox/checkpoint 事务。
+- `durable_api.py` / `durable_runtime.py`：PG 队列轮询、SKIP LOCKED、lease epoch、预算保留和 scoped 状态/报告查询。
+- `recoverable_runner.py`：固定 Job 名持久保留，恢复先对账；结果已提交则回放，未知写不重新提交。
 - `runner/`：独立执行镜像；运行前校验源码和独立 oracle hash，Docker socket/密钥不进入容器。
 - 固定 oracle 通过真实 HTTP 请求验证读重试、写不重试、路由优先级和限流；Gateway 对 Upstream 也发起真实请求。
 
 这是 **M0 + M1 本地固定目标纵切 + 模块 E 的首个可运行子集**。
 已实现 Task API、HTTP 被测 gateway 和独立容器 Runner；目标仍是工作树固定 fixture，
-尚未接入企业 Git commit manifest、PostgreSQL 任务事实源或 OIDC。
+第三批已接入 PostgreSQL 任务事实源及固定 Job crash recovery。
+尚未接入企业 Git commit manifest、S3、OIDC；不是完整 M2/M3。
 
 ## 运行
 
 推荐使用 [启动与验证 Runbook](runbook.md) 启动 `nanobot testpilot serve`。
+PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable` 显式开启；DB 失败不会降级为内存模式。
 运行前构建 `runner/Dockerfile`，从环境提供随机开发 Token，并以不可变镜像 ID 准入。
 带 `--config <nanobot配置>` 时复用既有 Provider；不带时使用脚本 Provider。
 实际验证脚本为 `scripts/testpilot_live_smoke.py`，会启动 nanobot 进程、提交两条任务、
@@ -62,7 +67,7 @@ flowchart LR
 `execution.json` 与 `artifacts/<sha256>`。默认输出被 Git 忽略。
 `--output <directory>` 可指定位置，清理时只删除自己指定的任务目录即可。
 
-新环境可按上游 `pyproject.toml` 安装 `.[dev]`；已测环境的 115 个依赖精确版本存于
+新环境可按上游 `pyproject.toml` 安装 `.[dev]`；已测环境的 117 个依赖精确版本存于
 `requirements-testpilot-py313.lock`。它是当前 macOS/Python 3.13 环境快照，尚未验证跨平台
 重装，也不是企业发布所需的镜像 digest/全平台 lock。
 
@@ -82,7 +87,9 @@ flowchart LR
 - [x] 启动真实 nanobot Task API，脚本 Provider 和 DeepSeek 模型分别验证正常/缺陷任务。
 - [x] 容器隔离探针、取消后确认移除、重复/并发取消和禁止自动重发。
 - [ ] M1 企业目标接入：Git commit source manifest、服务端身份/环境快照、企业 Runner 契约。
-- [ ] M2：PostgreSQL 租约/fencing、operation/attempt/job、checkpoint、outbox、UNKNOWN 对账。
+- [x] M2 子集：PG Task/Run/Operation/Attempt、租约/fencing、Checkpoint、事件/outbox 同事务、原固定 Job 对账。
+- [x] 真实 nanobot SIGKILL/重启：原 Docker Job 数量=1、原请求幂等、预算和租约 epoch 保留。
+- [ ] M2 完整验收：外部等待释放 Worker、独立 Scheduler/Reconciler、完整 F01–F05/F11–F13、S3/GC 与版本化完整上下文恢复。
 - [ ] M3：企业授权/审批、取消/进程树确认、外部幂等、rerun 与首轮失败保留、完整 Evidence 类型。
 - [ ] M4：task 级预算、Plan/Progress Guard/上下文、受治理的按需 RAG、真实模型评测。
 - [ ] M5：OIDC、SSE/控制台、真实 GitLab/CI Adapter、容量测量、运维 runbook。
@@ -100,8 +107,11 @@ OAuth introspection 或受信 stdio 配置获得，模型不能传 tenant/ACL pr
 
 ## 当前任务服务的生命周期
 
-任务状态与 Idempotency-Key 目前只保存在进程内，并发上限 2、最多保留 100 个任务；超限 429。
+不带 `--durable` 的旧开发模式：任务状态与 Idempotency-Key 保存在进程内，并发上限 2、最多保留 100 个任务；超限 429。
 进程内同主体同 key 同请求返回原 task，不同请求 409；Runner 同实例只执行一次 operation。
 停止服务会取消活跃任务并确认容器清理。重启后不能从 API 恢复旧 task 查询，不能把它部署为共享任务服务。
 报告/产物/operation 调查记录保留在本地文件中，但它们不是 PostgreSQL 任务账本。
-跨进程幂等、crash recovery、UNKNOWN 对账属于 M2，未完成前不声称 exactly-once。
+带 `--durable`：任务/请求 key/原 run/operation/模型主循环预算保存在 PG，同 tenant/project 的有界队列最多 10 个活跃任务。
+Worker 领取用 SKIP LOCKED，默认租约 30 秒、每 10 秒心跳；所有写回/工具准入要求有效 owner/epoch。
+Runner Job 保留唯一名称，恢复不重新 start 已有容器，已终态只读真实 JUnit/日志，无法查询则 UNKNOWN/NEEDS_REVIEW。
+当前依赖同一 Docker daemon 和同一持久产物根目录。没有声称跨任意外部系统 exactly-once 或完整企业恢复。

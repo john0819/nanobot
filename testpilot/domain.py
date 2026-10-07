@@ -48,6 +48,7 @@ class ExecutionRecord(Contract):
     task_id: str
     run_id: str
     operation_id: str
+    external_run_id: str | None = None
     target: Target
     state: Literal["COMPLETED", "TIMED_OUT", "CANCELLED"]
     exit_code: int | None
