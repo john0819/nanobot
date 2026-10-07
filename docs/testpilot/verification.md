@@ -1,5 +1,32 @@
 # TestPilot 验证记录
 
+## 第六批：复跑、历史报告、审核 Memory
+
+日期：2026-10-07。交付 Task 跨 Run 原预算复跑、不可变终态报告、Memory 审核与控制台入口。
+
+| 检查 | 实际结果 |
+|---|---|
+| TestPilot 全集（真实 PG/Docker） | **99 passed** |
+| 最近上游 Runner/QA 兼容集 | **66 passed**，0.44 秒 |
+| Ruff / strict BasedPyright / JS | 全通过 / 0 errors / node --check 通过 |
+| SQL | 追加 005，001–004 不修改，既有终态迁移进 run_results |
+| 并发复跑 | 三个同 key 请求仅一个 202，其余 200，同新 Run；共 2 个真实 Operation/Job |
+| 历史与预算 | 原失败报告不变、PG 拒绝修改、历史证据可读；新报告仍 planned=4；轮次累加、deadline 不变 |
+| 复跑拒绝 | stale hash/version、预算耗尽、UNKNOWN Operation、其他用户读取拒绝；新 Run 重新独立审批 |
+| Memory | 候选不被读、自审/非 reviewer 拒绝、版本冲突、个人/tenant/代码/环境隔离、TTL/撤销/审计 |
+| 来源可信 | 只允许有效失败 case；任意 value/凭证字段拒绝；来源产物篡改后确认 409 |
+| 真实启动 | nanobot API + JWT 测试 IdP + RAG MCP + S3 + Docker，2 Task + 缺陷新 Run 通过 |
+| 实际经验使用 | 经审核的来源在复跑 memory_read checkpoint 中出现；随后撤销；不是当前结果证据 |
+| 模型费用 | 本批全部 scripted Provider，无新增付费调用；未声称 Memory 改善率 |
+
+真实链路结果：`.local/testpilot-governed-smoke/73e3780684d34c2e856ab24d83cb1728/summary.json`。
+正常 4 PASS、缺陷 3 PASS/1 FAIL；缺陷复跑仍 3 PASS/1 FAIL，首轮失败未抹掉。
+该 Task 创建时上限 24 轮，原 Run 用 9 轮，复跑后合计 18 轮，没有在复跑时扩大预算。
+Memory matching 最初只含 suite，负面测试暴露健康/缺陷模式共用断言的边界，已增加 commit/environment 精确匹配。
+控制台增加接口操作与安全身份切换；JS 语法和服务端协议通过，尚未做浏览器交互自动化。
+
+运行和限制见 [历史与经验 Runbook](history-memory-runbook.md) 和 [ADR 006](adr/006-run-history-reviewed-memory.md)。
+
 ## 第五批：治理、知识与团队操作入口
 
 日期：2026-10-07。新增 S3 远端证据、JWT/角色、独立持久审批、Plan/Context、任务级 RAG 与控制台。

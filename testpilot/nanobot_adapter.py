@@ -12,7 +12,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, ProviderConversationState
 from nanobot.utils.helpers import estimate_prompt_tokens_chain
 from nanobot.utils.llm_runtime import LLMRuntime
-from testpilot.analysis_tools import ArtifactTool, CaseTool, KnowledgeTool, PlanTool
+from testpilot.analysis_tools import ArtifactTool, CaseTool, KnowledgeTool, MemoryTool, PlanTool
 from testpilot.artifacts import digest
 from testpilot.context import ContextBudgetError, input_budget
 from testpilot.domain import PendingExecution, ReportCandidate
@@ -90,6 +90,8 @@ async def run_task(
         tools.register(PlanTool(controls))
         tools.register(ArtifactTool(executor, controls))
         tools.register(CaseTool(executor))
+        if controls.memory:
+            tools.register(MemoryTool(controls))
     if controls and controls.knowledge:
         tools.register(KnowledgeTool(controls))
     progress_state = ProgressState()

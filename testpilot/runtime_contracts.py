@@ -28,3 +28,4 @@ class RunControls:
     enable_planning: bool = False
     knowledge: Callable[[str], Awaitable[KnowledgeResult]] | None = None
     artifact_allowed: Callable[[str], Awaitable[bool]] | None = None
+    memory: Callable[[], Awaitable[list[dict[str, object]]]] | None = None

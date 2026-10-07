@@ -16,11 +16,19 @@ from testpilot.durable_runtime import DurableTaskRunner, WorkerPool
 from testpilot.event_stream import stream
 from testpilot.execution import FixtureMode
 from testpilot.governance import ApprovalDecision, ApprovalDeniedError
+from testpilot.history import MemoryCandidateRequest, MemoryDecision, RerunRequest
 from testpilot.identity import AuthenticationError, IdentityProvider, StaticIdentity, require_role
 from testpilot.knowledge import MCPKnowledgeClient
+from testpilot.memory import MemoryRepository, verify_source
 from testpilot.openapi import document
 from testpilot.scheduler import JobScheduler
-from testpilot.storage.postgres import CapacityReachedError, Ledger, RequestConflictError, TaskRow
+from testpilot.storage.postgres import (
+    BudgetExhaustedError,
+    CapacityReachedError,
+    Ledger,
+    RequestConflictError,
+    TaskRow,
+)
 from testpilot.storage_contracts import ArtifactFactory, local_artifacts
 from testpilot.task_api import Principal, TaskRequest
 
@@ -128,7 +136,8 @@ def create_app(
 
     async def artifact(request: web.Request) -> web.Response:
         task = await get_task(request)
-        refs = task.report.get("artifact_refs") if task.report else None
+        selected_report = await ledger.run_report(task, request.query["run_id"]) if "run_id" in request.query else task.report
+        refs = selected_report.get("artifact_refs") if selected_report else None
         content_hash = request.match_info["hash"]
         if not isinstance(refs, list) or content_hash not in refs:
             raise web.HTTPNotFound(text="Artifact not found")
@@ -201,6 +210,99 @@ def create_app(
             raise web.HTTPNotFound(text="Plan not yet proposed")
         return web.json_response(item)
 
+    async def runs(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        rows = await ledger.runs(task)
+        for row in rows:
+            row["active"] = row["run_id"] == task.run_id
+            row["finished_at"] = row["finished_at"].isoformat() if row["finished_at"] else None
+            candidate = row.pop("report")
+            row["report_ready"] = candidate is not None
+            row["quality_verdict"] = candidate.get("quality_verdict") if candidate else None
+            row["state"] = row["state"] or (task.state if row["active"] else "NEEDS_REVIEW")
+        return web.json_response({"runs": rows})
+
+    async def historical_report(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        body = await ledger.run_report(task, request.match_info["run_id"])
+        if body is None:
+            raise web.HTTPNotFound(text="Run report not found")
+        try:
+            store = artifacts(root, ledger.tenant_id, task.id)
+            for ref in TypeAdapter(list[str]).validate_python(body.get("artifact_refs", []), strict=True):
+                await asyncio.to_thread(store.read, ref)
+        except (ValueError, OSError):
+            raise web.HTTPConflict(text="Run evidence unavailable") from None
+        return web.json_response(body)
+
+    async def rerun(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        owner = await auth(request)
+        permission(owner, "executor")
+        key = request.headers.get("Idempotency-Key", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", key):
+            raise web.HTTPUnprocessableEntity(text="Idempotency-Key required")
+        try:
+            spec = RerunRequest.model_validate_json(await request.read())
+            fresh, run_id, created = await ledger.rerun(task.id, owner.user_id, key, spec.expected_state_version, spec.reason)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid rerun contract") from None
+        except (RequestConflictError, BudgetExhaustedError):
+            raise web.HTTPConflict(text="Rerun state/version/budget or unresolved operation conflict") from None
+        except CapacityReachedError:
+            raise web.HTTPTooManyRequests(text="Task capacity reached") from None
+        return web.json_response({**fresh.snapshot(), "requested_run_id": run_id}, status=202 if created else 200)
+
+    memory_repository = MemoryRepository(ledger)
+
+    async def memory_candidate(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        permission(await auth(request), "executor")
+        try:
+            spec = MemoryCandidateRequest.model_validate_json(await request.read())
+            item = await memory_repository.propose(task, spec)
+            await verify_source(ledger, root, artifacts, item)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid memory source contract") from None
+        except (RequestConflictError, ValueError, OSError):
+            raise web.HTTPConflict(text="Verified failure evidence required") from None
+        return web.json_response(item.model_dump(mode="json"), status=201)
+
+    async def memory_list(request: web.Request) -> web.Response:
+        owner = await auth(request)
+        review = request.query.get("review", "false") == "true"
+        if review:
+            permission(owner, "reviewer")
+        return web.json_response({"records": [item.model_dump(mode="json") for item in await memory_repository.list_entries(owner.user_id, review)]})
+
+    async def memory_decide(request: web.Request) -> web.Response:
+        owner = await auth(request)
+        permission(owner, "reviewer")
+        try:
+            spec = MemoryDecision.model_validate_json(await request.read())
+            item = await memory_repository.get(request.match_info["memory_id"], owner.user_id, reviewer=True)
+            if item is None:
+                raise web.HTTPNotFound(text="Memory not found")
+            if spec.decision == "CONFIRM":
+                await verify_source(ledger, root, artifacts, item)
+            fresh = await memory_repository.decide(item.id, owner.user_id, spec)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid memory decision contract") from None
+        except (RequestConflictError, ValueError, OSError):
+            raise web.HTTPConflict(text="Memory version/reviewer/source/state conflict") from None
+        return web.json_response(fresh.model_dump(mode="json"))
+
+    async def memory_events(request: web.Request) -> web.Response:
+        owner = await auth(request)
+        reviewer = bool(set(owner.roles).intersection({"reviewer", "admin"}))
+        item = await memory_repository.get(request.match_info["memory_id"], owner.user_id, reviewer)
+        if item is None:
+            raise web.HTTPNotFound(text="Memory not found")
+        rows = await memory_repository.events(item.id)
+        for row in rows:
+            row["created_at"] = row["created_at"].isoformat()
+        return web.json_response({"memory_id": item.id, "events": rows})
+
     async def startup(_app: web.Application) -> None:
         await pool.start()
         if start_scheduler:
@@ -212,6 +314,13 @@ def create_app(
 
     app = web.Application(client_max_size=8192, middlewares=[database_errors])
     register_console(app)
+    app.router.add_get("/v1/tasks/{task_id}/runs", runs)
+    app.router.add_get("/v1/tasks/{task_id}/runs/{run_id}/report", historical_report)
+    app.router.add_post("/v1/tasks/{task_id}/rerun", rerun)
+    app.router.add_post("/v1/tasks/{task_id}/memory", memory_candidate)
+    app.router.add_get("/v1/memory", memory_list)
+    app.router.add_post("/v1/memory/{memory_id}/decision", memory_decide)
+    app.router.add_get("/v1/memory/{memory_id}/events", memory_events)
     app.router.add_get("/health/live", health)
     app.router.add_get("/health/ready", ready)
     app.router.add_get("/openapi.json", openapi)

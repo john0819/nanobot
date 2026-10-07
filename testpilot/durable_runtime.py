@@ -16,6 +16,7 @@ from testpilot.context import ContextBlock, ContextBudgetError, select
 from testpilot.domain import ExecutionRecord, PendingExecution
 from testpilot.evidence import build_report, check_execution
 from testpilot.knowledge import KnowledgeUnavailableError, MCPKnowledgeClient, evidence
+from testpilot.memory import MemoryRepository, verify_source
 from testpilot.progress import ProgressStalledError
 from testpilot.recoverable_runner import RetainedRunner, UnknownDispatchError
 from testpilot.runtime_contracts import RunControls, RuntimeYieldError
@@ -194,6 +195,23 @@ class WorkerPool:
             async def artifact_allowed(content_hash: str) -> bool:
                 return content_hash in await self.ledger.knowledge_artifacts(task)
 
+            async def memory() -> list[dict[str, object]]:
+                repository = MemoryRepository(self.ledger)
+                entries = await repository.retrieve(task)
+                verified: list[dict[str, object]] = []
+                for entry in entries:
+                    item = await repository.get(str(entry["memory_id"]), task.actor_id)
+                    if item is not None and item.status == "CONFIRMED" and item.version == entry["version"]:
+                        try:
+                            await verify_source(self.ledger, self.root, self.artifacts, item)
+                        except (ValueError, OSError, ArtifactUnavailableError):
+                            continue  # Missing/corrupted evidence never becomes active memory.
+                        current_item = await repository.get(item.id, task.actor_id)
+                        if current_item is not None and current_item.status == "CONFIRMED" and current_item.version == item.version:
+                            verified.append(entry)
+                await self.ledger.checkpoint(task, {"phase": "memory_read", "refs": [{"memory_id": entry["memory_id"], "version": entry["version"]} for entry in verified]})
+                return verified
+
             controls = RunControls(
                 checkpoint=lambda body: self.ledger.checkpoint(task, body),
                 before_model=lambda: self.ledger.reserve_round(task),
@@ -204,6 +222,7 @@ class WorkerPool:
                 enable_planning=task.goal != "Validate gateway fixture" or task.knowledge_required,
                 knowledge=search if self.knowledge else None,
                 artifact_allowed=artifact_allowed,
+                memory=memory,
             )
             report = await asyncio.wait_for(self.run(executor, controls), remaining)
             fresh = await self.ledger.heartbeat(task, self.lease_seconds)

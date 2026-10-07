@@ -22,6 +22,8 @@ class ScriptedProvider(LLMProvider):
         tool_messages = [m for m in messages if m.get("role") == "tool"]
         available = {tool["function"]["name"] for tool in tools or []}
         used = {message.get("name") for message in tool_messages}
+        if "search_memory" in available and "search_memory" not in used:
+            return LLMResponse(content=None, tool_calls=[ToolCallRequest(id="memory", name="search_memory", arguments={})])
         if "propose_plan" in available and "propose_plan" not in used:
             steps = [{"id": "test", "action": "run_gateway_fixture", "rationale": "Use fixed independently reviewed assertions"},
                      {"id": "report", "action": "publish_report", "rationale": "Only parser-backed execution claims"}]

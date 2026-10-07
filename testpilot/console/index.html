@@ -12,7 +12,9 @@
 <section><h2>任务列表</h2><button id="refresh">我的任务</button><button id="review">待审批任务</button><div id="tasks"></div></section>
 <section><h2>任务详情</h2><label>任务 ID <input id="task-id"></label><button id="load">查看任务</button><button id="cancel">取消任务</button>
 <p id="stream-status" role="status"></p><pre id="snapshot"></pre><h3>计划</h3><pre id="plan"></pre>
+<h3>执行历史与复跑</h3><p>复跑创建新 Run，保留旧报告并使用原任务剩余预算；未决执行必须先对账。</p><label>复跑原因 <input id="rerun-reason" maxlength="500" value="Verify repeatability of the observed result"></label><button id="rerun">申请复跑</button><div id="runs"></div>
 <h3>审批内容</h3><p>审核目标、执行镜像和请求摘要后提交。相同申请人不能批准自己的任务。</p><pre id="approval-detail"></pre><button id="approve">批准</button><button id="deny">拒绝</button>
 <h3>事件时间线</h3><ol id="events"></ol><h3>验证报告</h3><pre id="report"></pre><div id="artifacts"></div></section>
+<section><h2>经审核的历史经验</h2><p>只从已验证失败生成观察候选，确认后按项目、用户、代码和环境匹配使用；它不证明当前测试结果。</p><label>来源 Run ID <input id="source-run"></label><label>已验证失败 Case ID <input id="source-case"></label><label><input id="memory-shared" type="checkbox">审核后允许项目内共享</label><button id="memory-create">提议经验候选</button><button id="memory-list">查看经验</button><button id="memory-review">待审经验</button><div id="memories"></div></section>
 <p id="notice" role="alert"></p>
 </main><script src="/console/app.js" defer></script></body></html>

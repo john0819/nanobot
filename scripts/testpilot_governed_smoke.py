@@ -40,6 +40,7 @@ async def main() -> None:
     parser.add_argument("--kb-project", type=Path, help="Start the real qa-kb-service authenticated MCP server")
     parser.add_argument("--repeats", type=int, default=1, help="Two tasks per repeat; paid when --config supplied")
     parser.add_argument("--mode", choices=["healthy", "retry-write-bug"], help="Limit acceptance to one scenario")
+    parser.add_argument("--exercise-history-memory", action="store_true", help="Also review failure memory and explicitly rerun the defect task")
     args = parser.parse_args()
     if not 1 <= args.repeats <= 100:
         parser.error("repeats must be 1..100")
@@ -80,7 +81,7 @@ async def main() -> None:
     idp_runner = web.AppRunner(idp, access_log=None)
     await idp_runner.setup()
     await web.TCPSite(idp_runner, "127.0.0.1", idp_port).start()
-    settings = {"development": True, "requireApproval": True, "modelLimit": 12,
+    settings = {"development": True, "requireApproval": True, "modelLimit": 24 if args.exercise_history_memory else 12,
                 "jwtIssuer": issuer, "jwtAudience": "testpilot", "jwksFile": str(output / "jwks.json"),
                 "s3Endpoint": os.environ["TESTPILOT_S3_ENDPOINT"], "s3Region": "garage",
                 "s3Bucket": os.environ["TESTPILOT_S3_BUCKET"],
@@ -92,6 +93,7 @@ async def main() -> None:
     operations: list[str] = []
     records = []
     outcome = "FAILED"
+    historical_acceptance = None
     try:
         if args.kb_project:
             env = dict(os.environ, QAKB_MCP_TRANSPORT="streamable-http", QAKB_MCP_PORT=str(kb_port),
@@ -178,13 +180,49 @@ async def main() -> None:
                                     "passed": expected[0], "failed": expected[1], "model_rounds": state["model_rounds"],
                                     "knowledge_evidence_count": len(report["knowledge_evidence_ids"]),
                                     "latency_seconds": round(time.monotonic()-started, 2), "report_validated": True})
+                    if args.exercise_history_memory and mode == "retry-write-bug" and repeat == 0:
+                        old_run = state["run_id"]
+                        case_id = report["findings"][0]["case_id"]
+                        status, memory = await request("POST", f"/v1/tasks/{task_id}/memory", {"source_run_id": old_run, "case_id": case_id, "shared": True})
+                        assert status == 201 and memory["status"] == "CANDIDATE"
+                        status, confirmed = await request("POST", f"/v1/memory/{memory['id']}/decision", {"expected_version": memory["version"], "decision": "CONFIRM"}, reviewer=True)
+                        assert status == 200 and confirmed["status"] == "CONFIRMED"
+                        rerun_body = {"expected_state_version": state["state_version"], "reason": "Explicit revalidation with reviewed failure observation"}
+                        status, revalidation = await request("POST", f"/v1/tasks/{task_id}/rerun", rerun_body, idempotency="revalidate")
+                        assert status == 202 and revalidation["state"] == "WAITING_APPROVAL"
+                        assert (await request("POST", f"/v1/tasks/{task_id}/rerun", rerun_body, idempotency="revalidate"))[0] == 200
+                        _, pending = await request("GET", f"/v1/tasks/{task_id}/approval", reviewer=True)
+                        assert pending["run_id"] != old_run and pending["consumed_operation_id"] is None
+                        assert (await request("POST", f"/v1/tasks/{task_id}/approval", {"request_hash": pending["request_hash"], "decision": "APPROVE"}, reviewer=True))[0] == 200
+                        for _ in range(600):
+                            _, second = await request("GET", f"/v1/tasks/{task_id}")
+                            if second["state"] in {"COMPLETED", "NEEDS_REVIEW", "CANCELLED"}:
+                                break
+                            await asyncio.sleep(0.2)
+                        if second.get("operation_id"):
+                            operations.append(second["operation_id"])
+                        assert second["state"] == "COMPLETED", second
+                        _, archived = await request("GET", f"/v1/tasks/{task_id}/runs/{old_run}/report")
+                        assert archived == report
+                        _, current = await request("GET", f"/v1/tasks/{task_id}/report")
+                        assert current["test_summary"]["planned"] == 4 and current["test_summary"]["failed"] == 1
+                        from testpilot.storage.postgres import Ledger
+                        ledger = Ledger(os.environ["TESTPILOT_DATABASE_URL"])
+                        async with ledger.connection() as connection:
+                            cursor = await connection.execute("SELECT body FROM testpilot.checkpoints WHERE tenant_id=%s AND run_id=%s AND body->>'phase'='memory_read'", (ledger.tenant_id, second["run_id"]))
+                            reads = await cursor.fetchall()
+                            assert any(ref["memory_id"] == memory["id"] for row in reads for ref in row["body"]["refs"])
+                        assert (await request("POST", f"/v1/memory/{memory['id']}/decision", {"expected_version": confirmed["version"], "decision": "REVOKE"}, reviewer=True))[0] == 200
+                        historical_acceptance = {"task_id": task_id, "first_run": old_run, "rerun": second["run_id"],
+                                                 "original_report_preserved": True, "model_rounds_total": second["model_rounds"],
+                                                 "memory_read_verified": True, "memory_revoked": True}
         outcome = "PASSED"
         print(f"Governed acceptance passed: {len(records)} tasks; results: {output/'summary.json'}")
     finally:
         (output/"summary.json").write_text(json.dumps({"outcome": outcome,
                                                      "model_kind": "configured" if args.config else "scripted",
                                                      "idp_kind": "local-test-double", "rag": bool(args.kb_project),
-                                                     "records": records}, indent=2)+"\n")
+                                                     "records": records, "history_memory": historical_acceptance}, indent=2)+"\n")
         for process in reversed(processes):
             if process.poll() is None:
                 process.terminate()

@@ -3,6 +3,7 @@
 
 def document(durable: bool = False) -> dict[str, object]:
     from testpilot.governance import ApprovalDecision
+    from testpilot.history import MemoryCandidateRequest, MemoryDecision, RerunRequest
     from testpilot.task_api import TaskRequest
 
     json_task: dict[str, object] = {"application/json": {"schema": {"$ref": "#/components/schemas/TaskSnapshot"}}}
@@ -13,12 +14,21 @@ def document(durable: bool = False) -> dict[str, object]:
         return {"description": description, "content": content}
 
     return {
-        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.5.0" if durable else "0.2.0",
+        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.6.0" if durable else "0.2.0",
                                      "description": "PG asynchronous Job scheduler, persistent progress guard and authenticated SSE replay." if durable else "Loopback development only. In-memory task state; no durable recovery."},
         "servers": [{"url": "http://127.0.0.1:8920"}],
         "security": [{"LocalBearer": []}],
         "paths": {
             **({
+                "/v1/tasks/{task_id}/rerun": {"post": {"parameters": [task_id, {"name": "Idempotency-Key", "in": "header", "required": True, "schema": {"type": "string"}}],
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RerunRequest"}}}},
+                    "responses": {"202": response("New revalidation Run, original task budget and prior reports retained"), "200": response("Idempotent replay; requested_run_id identifies the created Run"), "401": error, "403": error, "404": error, "409": error, "422": error, "429": error}}},
+                "/v1/tasks/{task_id}/runs": {"get": {"parameters": [task_id], "responses": {"200": response("Ordered immutable run result metadata"), "401": error, "404": error}}},
+                "/v1/tasks/{task_id}/runs/{run_id}/report": {"get": {"parameters": [task_id, {"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": response("Historical report with rechecked evidence"), "401": error, "404": error, "409": error, "503": error}}},
+                "/v1/tasks/{task_id}/memory": {"post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MemoryCandidateRequest"}}}}, "responses": {"201": response("Candidate observation derived from verified failure"), "401": error, "403": error, "404": error, "409": error, "422": error}}},
+                "/v1/memory": {"get": {"parameters": [{"name": "review", "in": "query", "schema": {"type": "boolean"}}], "responses": {"200": response("Scoped records or authorized pending-review queue"), "401": error, "403": error}}},
+                "/v1/memory/{memory_id}/events": {"get": {"parameters": [{"name": "memory_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": response("Authorized immutable memory version audit"), "401": error, "404": error}}},
+                "/v1/memory/{memory_id}/decision": {"post": {"parameters": [{"name": "memory_id", "in": "path", "required": True, "schema": {"type": "string"}}], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MemoryDecision"}}}}, "responses": {"200": response("Independent confirmation/revocation with version audit"), "401": error, "403": error, "404": error, "409": error, "422": error}}},
                 "/v1/tasks/{task_id}/approval": {
                     "get": {"parameters": [task_id], "responses": {"200": response("Canonical execution request; owner or project reviewer"), "401": error, "403": error, "404": error}},
                     "post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApprovalDecision"}}}},
@@ -73,9 +83,11 @@ def document(durable: bool = False) -> dict[str, object]:
             "schemas": {
                 "TaskRequest": TaskRequest.model_json_schema(),
                 **({"ApprovalDecision": ApprovalDecision.model_json_schema()} if durable else {}),
+                **({"RerunRequest": RerunRequest.model_json_schema(), "MemoryCandidateRequest": MemoryCandidateRequest.model_json_schema(), "MemoryDecision": MemoryDecision.model_json_schema()} if durable else {}),
                 "TaskSnapshot": {"type": "object", "required": ["task_id", "state", "mode", "created_at", "error", "report_ready", "operation_id"] + (["run_id", "lease_epoch", "model_rounds"] if durable else []),
                                  "properties": {
                                      **({"run_id": {"type": "string"}, "lease_epoch": {"type": "integer", "minimum": 0},
+                                         "state_version": {"type": "integer", "minimum": 0}, "model_limit": {"type": "integer", "minimum": 4, "maximum": 40},
                                          "model_rounds": {"type": "integer", "minimum": 0, "maximum": 40},
                                          "waiting_reason": {"type": ["string", "null"]}, "next_wakeup_at": {"type": ["string", "null"], "format": "date-time"}} if durable else {}),
                                      "task_id": {"type": "string"},

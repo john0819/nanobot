@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from testpilot.domain import PendingExecution
+from testpilot.memory import MemoryRepository
 from testpilot.recoverable_runner import RetainedRunner, UnknownDispatchError
 from testpilot.storage.postgres import LeaseLostError, Ledger, TaskRow
 from testpilot.storage_contracts import ArtifactFactory, local_artifacts
@@ -34,6 +35,7 @@ class JobScheduler:
         while True:
             try:
                 await self.ledger.expire_approvals()
+                await MemoryRepository(self.ledger).expire()
                 task = await self.ledger.claim(owner, self.lease_seconds, kind="external")
                 if task is not None:
                     await self.reconcile(task)

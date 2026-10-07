@@ -41,6 +41,35 @@ class PlanTool(Tool):
         return json.dumps({"plan_version": version, "accepted": True})
 
 
+class MemoryTool(Tool):
+    def __init__(self, controls: RunControls) -> None:
+        self.controls = controls
+
+    @property
+    def name(self) -> str:
+        return "search_memory"
+
+    @property
+    def description(self) -> str:
+        return "Read current-authorized, unexpired reviewed historical failure observations for this suite. Never evidence that this run passed/failed."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}, "additionalProperties": False}
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    async def execute(self, **kwargs: Any) -> str:
+        if kwargs or self.controls.memory is None:
+            return self.error("Memory scope unavailable")
+        entries = await self.controls.memory()
+        while tokens(json.dumps(entries, ensure_ascii=False)) > 2000 and entries:
+            entries.pop()
+        return json.dumps({"entries": entries, "current_execution_evidence": False})
+
+
 class ArtifactRead(Contract):
     artifact_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     offset: int = Field(default=0, ge=0, le=4*1024*1024)
