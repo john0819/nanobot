@@ -1,5 +1,50 @@
 # TestPilot 验证记录
 
+## 第四批：四个关联模块
+
+日期：2026-10-07。交付 Async Runtime Yield、独立 Job Scheduler、持久 Progress Guard 与 SSE。
+
+| 检查 | 实际结果 |
+|---|---|
+| TestPilot 全集（PG/Docker，无 skip） | **80 passed**，19.80 秒 |
+| 最近上游 Runner/QA 兼容集 | **66 passed**，0.50 秒 |
+| Ruff / strict BasedPyright | All checks passed / 0 errors |
+| 原数据追加迁移 | 新增 002，001 字节/校验和保留，既有数据不重建 |
+| 真实 Docker pause + 只有一个 Agent Worker | 首任务等待、租约为空、模型预算保持 1；第二任务可先完成 |
+| 同轮调用协议 | PENDING 前所有 tool_call_id/result 已配对，tools_completed checkpoint 无遗失项 |
+| Scheduler 取消 / deadline / heartbeat | 不发模型请求，paused Job 解除 pause 后停止并确认终态；不把等待当执行通过 |
+| 轮询退避截止 | next_check_at/next_wakeup_at 不超出原 Job/Task deadline |
+| Waiting API 重启 | 恢复同 external ID、Docker Job 数量=1 |
+| Progress Guard | 连续重复/A-B 震荡；PG 跨 owner 保留；真实 Agent 停滞保留已执行统计并 NEEDS_REVIEW |
+| SSE | id 重连续读、不重复；断线不取消；撤销已连接权限；future/过期 cursor 409 resync；心跳不占 seq |
+| 原 SIGKILL smoke 在新状态机上重跑 | DISPATCHING 中断后同 Job 对账，外部数量=1，report validated、3 PASS / 1 FAIL |
+
+此次新增 14 项测试（观测级 Guard 4 项、PG/Docker/SSE 合同 10 项），与原 66 项一起通过。
+全部验证由脚本 Provider 控制 Runtime，真实 SQL/Docker/HTTP pytest 均实际执行；不表述为真实模型准确率。
+
+### 真实 API + 独立 Scheduler 两进程验证
+
+执行 `scripts/testpilot_async_smoke.py`：API 以 --no-scheduler --workers 1 运行，两条任务均进入外部等待，
+这时还没有 Scheduler 进程；模型预算均为 1。SSE 断线没有取消任务。
+另起 `nanobot testpilot scheduler` 后，按 seq=6 重連 SSE，收到不重复的后续事件和最终 report.validated/task.completed。
+实测：
+
+- `task_0d9064f62f744086a23d551b9fd5b491`：3 PASS / 1 FAIL，quality_verdict=FAIL。
+- `task_f233225e9d10463abde9ac0254be9b5e`：4 PASS，quality_verdict=PASS。
+- 每个 operation 在 Docker server 的 Job 数量 **1**；最终累计主循环模型轮数均 **3**。
+- 两进程均已停止，自己的已提交 Job 已清理；PG 数据/本地报告保留。
+
+结果位于 `.local/testpilot-async-smoke/session_*/summary.json`。
+重跑 SIGKILL 的结果为 `task_f02f89f98b204a5cb704209ed0e4aa0c`，epoch 1→2，同一 external ID，累计 3 轮、无重复 Job。
+心跳/权限撤销、窗口 resync 和暂停 Job 的等待测试在 pytest 中验证，不从两个 CLI smoke 推断这些保证。
+
+### 当前边界
+
+已补齐等待释放、独立 Scheduler 和 SSE 的首个可运行实现；没有声称整个 M2/M4/M5 已完成。
+外部 outbox relay、S3/GC、企业 OIDC/审批、复杂 Plan/Context/Memory/RAG 工具治理、真实模型 held-out 评测仍在后续。
+Progress Guard 是有界的工具观测指纹规则，不具备完整业务语义判断或反思重规划。
+当前 fixture 范围和四轮主循环预算不变，不扩大为生成代码或任意企业系统执行。
+
 ## 第三批：PostgreSQL 账本、租约与原 Job 恢复
 
 日期：2026-10-07。独立 `testpilot-ledger-dev` PostgreSQL 17.11 数据库，随机开发凭证只保存在

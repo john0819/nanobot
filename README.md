@@ -4,6 +4,7 @@
 当前增量实现 **nanobot Task API → AgentRunner → 独立隔离 Runner → HTTP 网关测试 → JUnit/日志 → 可信报告**。
 已通过脚本 Provider 和真实 DeepSeek 模型的本地启动验证，包含 seeded defect、虚假成功声明阻断和容器取消清理。
 已增加 PostgreSQL 任务/操作账本、租约 fencing、checkpoint 与原 Job 对账，实际 SIGKILL/重启验证没有重复 Job。
+新增独立 Job Scheduler、WAITING_EXTERNAL 释放 Worker、持久 Progress Guard 与可重连 SSE，已有真实双进程验证。
 服务仍是回环地址上的开发部署；企业认证、S3、多机调度和完整故障矩阵继续按阶段补齐。
 
 - [二开说明、运行与阶段清单](docs/testpilot/README.md)

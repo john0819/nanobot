@@ -14,8 +14,9 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from testpilot.domain import Contract, ExecutionRecord, Target
+from testpilot.domain import Contract, ExecutionRecord, PendingExecution, Target
 from testpilot.execution import FixtureMode
+from testpilot.progress import ProgressStalledError, ProgressState, advance
 
 PROJECT = "gateway-fixture"
 
@@ -42,7 +43,7 @@ class TaskRow(Contract):
     id: str
     actor_id: str
     mode: FixtureMode
-    state: Literal["QUEUED", "RUNNING", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]
+    state: Literal["QUEUED", "RUNNING", "WAITING_EXTERNAL", "RECONCILING", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]
     run_id: str
     target: Target
     report: dict[str, object] | None
@@ -56,12 +57,15 @@ class TaskRow(Contract):
     state_version: int
     created_at: datetime
     updated_at: datetime
+    next_wakeup_at: datetime | None
+    progress_json: dict[str, object]
 
     def snapshot(self, operation_id: str | None = None) -> dict[str, object]:
         return {"task_id": self.id, "run_id": self.run_id, "state": self.state, "mode": self.mode,
                 "created_at": self.created_at.isoformat(), "report_ready": self.report is not None,
                 "error": self.error, "operation_id": operation_id, "lease_epoch": self.lease_epoch,
-                "model_rounds": self.model_rounds}
+                "model_rounds": self.model_rounds, "next_wakeup_at": self.next_wakeup_at.isoformat() if self.next_wakeup_at else None,
+                "waiting_reason": "EXTERNAL_JOB" if self.state in {"WAITING_EXTERNAL", "RECONCILING"} else None}
 
 
 class OperationRow(Contract):
@@ -71,10 +75,12 @@ class OperationRow(Contract):
     task_id: str
     run_id: str
     intent_ref: str
-    state: Literal["PREPARED", "DISPATCHING", "UNKNOWN", "SUCCEEDED", "CANCELLED"]
+    state: Literal["PREPARED", "DISPATCHING", "PENDING", "UNKNOWN", "SUCCEEDED", "CANCELLED"]
     result: dict[str, object] | None
     external_id: str | None
     lease_epoch: int
+    dispatched_at: datetime | None
+    job_external_id: str | None = None
 
     def execution(self) -> ExecutionRecord | None:
         return ExecutionRecord.model_validate_json(json.dumps(self.result)) if self.result else None
@@ -95,28 +101,37 @@ class Ledger:
             yield connection
 
     async def migrate(self) -> None:
-        source = Path(__file__).with_name("001_ledger.sql").read_text(encoding="utf-8")
-        checksum = hashlib.sha256(source.encode()).hexdigest()
         async with self.connection() as connection:
             await connection.execute("SELECT pg_advisory_xact_lock(8920001)")
             await connection.execute("CREATE SCHEMA IF NOT EXISTS testpilot")
             await connection.execute("CREATE TABLE IF NOT EXISTS testpilot.migrations (version integer PRIMARY KEY, checksum text NOT NULL)")
-            cursor = await connection.execute("SELECT checksum FROM testpilot.migrations WHERE version=1")
-            previous = await cursor.fetchone()
-            if previous:
-                if previous["checksum"] != checksum:
-                    raise ValueError("migration checksum drift; add a new migration")
-                return
-            await connection.execute(source.encode())
-            await connection.execute("INSERT INTO testpilot.migrations VALUES (1,%s)", (checksum,))
+            for version, source, checksum in self._migrations():
+                cursor = await connection.execute("SELECT checksum FROM testpilot.migrations WHERE version=%s", (version,))
+                previous = await cursor.fetchone()
+                if previous:
+                    if previous["checksum"] != checksum:
+                        raise ValueError("migration checksum drift; add a new migration")
+                else:
+                    await connection.execute(source.encode())
+                    await connection.execute("INSERT INTO testpilot.migrations VALUES (%s,%s)", (version, checksum))
+
+    @staticmethod
+    def _migrations() -> list[tuple[int, str, str]]:
+        migrations: list[tuple[int, str, str]] = []
+        for path in sorted(Path(__file__).parent.glob("[0-9][0-9][0-9]_*.sql")):
+            source = path.read_text(encoding="utf-8")
+            migrations.append((int(path.name[:3]), source, hashlib.sha256(source.encode()).hexdigest()))
+        if not migrations or [row[0] for row in migrations] != list(range(1, len(migrations)+1)):
+            raise ValueError("migration sequence invalid")
+        return migrations
 
     async def ready(self) -> None:
         async with self.connection() as connection:
-            cursor = await connection.execute("SELECT checksum FROM testpilot.migrations WHERE version=1")
-            row = await cursor.fetchone()
-            expected = hashlib.sha256(Path(__file__).with_name("001_ledger.sql").read_text(encoding="utf-8").encode()).hexdigest()
-            if row is None or row["checksum"] != expected:
-                raise RuntimeError("TestPilot migration required")
+            for version, _, expected in self._migrations():
+                cursor = await connection.execute("SELECT checksum FROM testpilot.migrations WHERE version=%s", (version,))
+                row = await cursor.fetchone()
+                if row is None or row["checksum"] != expected:
+                    raise RuntimeError("TestPilot migration required")
 
     async def _event(self, connection: AsyncConnection[dict[str, Any]], task: TaskRow, kind: str,
                      payload: dict[str, object] | None = None) -> int:
@@ -149,7 +164,7 @@ class Ledger:
                 task = await self._get(connection, previous["task_id"], actor)
                 assert task is not None
                 return task, False
-            cursor = await connection.execute("SELECT count(*) AS count FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND state IN ('QUEUED','RUNNING','CANCELLING')", (self.tenant_id, PROJECT))
+            cursor = await connection.execute("SELECT count(*) AS count FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND state IN ('QUEUED','RUNNING','WAITING_EXTERNAL','RECONCILING','CANCELLING')", (self.tenant_id, PROJECT))
             count = await cursor.fetchone()
             if count is None or count["count"] >= max_active:
                 raise CapacityReachedError("queue capacity reached")
@@ -175,20 +190,23 @@ class Ledger:
         async with self.connection() as connection:
             return await self._get(connection, task_id, actor)
 
-    async def claim(self, owner: str, lease_seconds: int = 30) -> TaskRow | None:
+    async def claim(self, owner: str, lease_seconds: int = 30,
+                    kind: Literal["all", "agent", "external"] = "all") -> TaskRow | None:
         if not 1 <= lease_seconds <= 300:
             raise ValueError("invalid lease duration")
         async with self.connection() as connection:
             cursor = await connection.execute(
                 "SELECT * FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s "
-                "AND (state='QUEUED' OR (state IN ('RUNNING','CANCELLING') AND lease_until < clock_timestamp())) "
-                "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1", (self.tenant_id, PROJECT),
+                "AND ((%s IN ('all','agent') AND (state='QUEUED' OR (state='RUNNING' AND lease_until<clock_timestamp()))) "
+                "OR (%s IN ('all','external') AND ((state='WAITING_EXTERNAL' AND next_wakeup_at<=clock_timestamp()) "
+                "OR (state IN ('RECONCILING','CANCELLING') AND COALESCE(lease_until,clock_timestamp()-interval '1 second')<clock_timestamp())))) "
+                "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1", (self.tenant_id, PROJECT, kind, kind),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
             cursor = await connection.execute(
-                "UPDATE testpilot.tasks SET state=CASE WHEN cancel_requested THEN 'CANCELLING' ELSE 'RUNNING' END,"
+                "UPDATE testpilot.tasks SET state=CASE WHEN cancel_requested THEN 'CANCELLING' WHEN state IN ('WAITING_EXTERNAL','RECONCILING') THEN 'RECONCILING' ELSE 'RUNNING' END,"
                 "lease_owner=%s,lease_epoch=lease_epoch+1,lease_until=clock_timestamp()+(%s * interval '1 second') "
                 "WHERE tenant_id=%s AND project_id=%s AND id=%s RETURNING *", (owner, lease_seconds, self.tenant_id, PROJECT, row["id"]),
             )
@@ -204,7 +222,7 @@ class Ledger:
         cursor = await connection.execute(
             "SELECT * FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND id=%s "
             "AND lease_owner=%s AND lease_epoch=%s AND lease_until>clock_timestamp() "
-            "AND state IN ('RUNNING','CANCELLING') FOR UPDATE",
+            "AND state IN ('RUNNING','RECONCILING','CANCELLING') FOR UPDATE",
             (self.tenant_id, PROJECT, task.id, task.lease_owner, task.lease_epoch),
         )
         row = await cursor.fetchone()
@@ -221,8 +239,9 @@ class Ledger:
     async def reserve_round(self, task: TaskRow) -> None:
         async with self.connection() as connection:
             fresh = await self._fence(connection, task)
-            if fresh.cancel_requested or fresh.model_rounds >= 4:
+            if fresh.state != "RUNNING" or fresh.cancel_requested or fresh.model_rounds >= 4:
                 raise BudgetExhaustedError("cancelled or model round budget exhausted")
+            await self._deadline(connection, fresh)
             await connection.execute("UPDATE testpilot.tasks SET model_rounds=model_rounds+1 WHERE tenant_id=%s AND project_id=%s AND id=%s", (self.tenant_id, PROJECT, task.id))
 
     async def checkpoint(self, task: TaskRow, body: dict[str, Any]) -> None:
@@ -239,14 +258,14 @@ class Ledger:
             if fresh.cancel_requested:
                 raise BudgetExhaustedError("cancel requested")
             await connection.execute("INSERT INTO testpilot.operations (tenant_id,project_id,id,task_id,run_id,lease_epoch) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (tenant_id,project_id,run_id,intent_ref) DO NOTHING", (self.tenant_id, PROJECT, "op_" + uuid4().hex, task.id, task.run_id, task.lease_epoch))
-            cursor = await connection.execute("SELECT * FROM testpilot.operations WHERE tenant_id=%s AND project_id=%s AND run_id=%s", (self.tenant_id, PROJECT, task.run_id))
+            cursor = await connection.execute("SELECT o.*,j.external_id AS job_external_id FROM testpilot.operations o LEFT JOIN testpilot.external_jobs j ON (j.tenant_id,j.project_id,j.operation_id)=(o.tenant_id,o.project_id,o.id) WHERE o.tenant_id=%s AND o.project_id=%s AND o.run_id=%s", (self.tenant_id, PROJECT, task.run_id))
             row = await cursor.fetchone()
             assert row is not None
             return OperationRow.model_validate(row)
 
     async def find_operation(self, task: TaskRow) -> OperationRow | None:
         async with self.connection() as connection:
-            cursor = await connection.execute("SELECT * FROM testpilot.operations WHERE tenant_id=%s AND project_id=%s AND run_id=%s", (self.tenant_id, PROJECT, task.run_id))
+            cursor = await connection.execute("SELECT o.*,j.external_id AS job_external_id FROM testpilot.operations o LEFT JOIN testpilot.external_jobs j ON (j.tenant_id,j.project_id,j.operation_id)=(o.tenant_id,o.project_id,o.id) WHERE o.tenant_id=%s AND o.project_id=%s AND o.run_id=%s", (self.tenant_id, PROJECT, task.run_id))
             row = await cursor.fetchone()
             return OperationRow.model_validate(row) if row else None
 
@@ -256,7 +275,8 @@ class Ledger:
             fresh = await self._fence(connection, task)
             if fresh.cancel_requested:
                 raise BudgetExhaustedError("cancel requested")
-            cursor = await connection.execute("UPDATE testpilot.operations SET state='DISPATCHING',lease_epoch=%s,external_id=%s WHERE tenant_id=%s AND project_id=%s AND id=%s AND state='PREPARED' RETURNING id", (task.lease_epoch, "testpilot-" + operation.id, self.tenant_id, PROJECT, operation.id))
+            await self._deadline(connection, fresh)
+            cursor = await connection.execute("UPDATE testpilot.operations SET state='DISPATCHING',lease_epoch=%s,external_id=%s,dispatched_at=clock_timestamp() WHERE tenant_id=%s AND project_id=%s AND id=%s AND state='PREPARED' RETURNING id", (task.lease_epoch, "testpilot-" + operation.id, self.tenant_id, PROJECT, operation.id))
             if await cursor.fetchone() is None:
                 raise LeaseLostError("operation already dispatched")
             await connection.execute("INSERT INTO testpilot.attempts (tenant_id,project_id,operation_id,sequence,dispatch_certainty) VALUES (%s,%s,%s,1,'UNKNOWN')", (self.tenant_id, PROJECT, operation.id))
@@ -270,11 +290,12 @@ class Ledger:
         async with self.connection() as connection:
             await self._fence(connection, task)
             state = "SUCCEEDED" if record else "UNKNOWN"
-            cursor = await connection.execute("UPDATE testpilot.operations SET state=%s,result=%s WHERE tenant_id=%s AND project_id=%s AND id=%s AND state IN ('DISPATCHING','UNKNOWN') RETURNING id", (state, Jsonb(record.model_dump(mode="json")) if record else None, self.tenant_id, PROJECT, operation.id))
+            cursor = await connection.execute("UPDATE testpilot.operations SET state=%s,result=%s WHERE tenant_id=%s AND project_id=%s AND id=%s AND state IN ('DISPATCHING','PENDING','UNKNOWN') RETURNING id", (state, Jsonb(record.model_dump(mode="json")) if record else None, self.tenant_id, PROJECT, operation.id))
             if await cursor.fetchone() is None:
                 return  # A terminal result must never be overwritten or announced as UNKNOWN by a late attempt.
             if record:
                 await connection.execute("UPDATE testpilot.attempts SET dispatch_certainty='SENT',ended_at=clock_timestamp() WHERE tenant_id=%s AND project_id=%s AND operation_id=%s", (self.tenant_id, PROJECT, operation.id))
+            await connection.execute("UPDATE testpilot.external_jobs SET state=%s WHERE tenant_id=%s AND project_id=%s AND operation_id=%s", (state, self.tenant_id, PROJECT, operation.id))
             sequence = await self._event(connection, task, "operation." + state.lower(), {"operation_id": operation.id})
             await connection.execute("INSERT INTO testpilot.checkpoints (tenant_id,project_id,task_id,run_id,event_seq,body) VALUES (%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, task.id, task.run_id, sequence, Jsonb({"phase": "operation_result", "operation_id": operation.id, "state": state})))
 
@@ -298,13 +319,14 @@ class Ledger:
     async def release(self, task: TaskRow) -> None:
         async with self.connection() as connection:
             fresh = await self._fence(connection, task)
-            await connection.execute("UPDATE testpilot.tasks SET state=%s,lease_owner=NULL,lease_until=clock_timestamp()-interval '1 second' WHERE tenant_id=%s AND project_id=%s AND id=%s", ("QUEUED" if not fresh.cancel_requested else "CANCELLING", self.tenant_id, PROJECT, task.id))
+            state = "CANCELLING" if fresh.cancel_requested else "WAITING_EXTERNAL" if fresh.state == "RECONCILING" else "QUEUED"
+            await connection.execute("UPDATE testpilot.tasks SET state=%s,lease_owner=NULL,lease_until=clock_timestamp()-interval '1 second' WHERE tenant_id=%s AND project_id=%s AND id=%s", (state, self.tenant_id, PROJECT, task.id))
 
     async def cancel(self, task_id: str, actor: str) -> TaskRow | None:
         async with self.connection() as connection:
             await connection.execute("SELECT id FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND id=%s AND actor_id=%s FOR UPDATE", (self.tenant_id, PROJECT, task_id, actor))
             task = await self._get(connection, task_id, actor)
-            if task and task.state in {"QUEUED", "RUNNING", "CANCELLING"}:
+            if task and task.state in {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "RECONCILING", "CANCELLING"}:
                 await connection.execute("UPDATE testpilot.tasks SET cancel_requested=true,state='CANCELLING',lease_until=COALESCE(lease_until,clock_timestamp()-interval '1 second') WHERE tenant_id=%s AND project_id=%s AND id=%s", (self.tenant_id, PROJECT, task.id))
                 await self._event(connection, task, "task.cancel_requested")
                 return await self._get(connection, task_id, actor)
@@ -325,8 +347,75 @@ class Ledger:
             await self._fence(connection, task)
             await connection.execute("UPDATE testpilot.operations SET state=CASE WHEN state='SUCCEEDED' THEN state ELSE 'CANCELLED' END,result=COALESCE(result,%s) WHERE tenant_id=%s AND project_id=%s AND id=%s", (Jsonb(record.model_dump(mode="json")) if record else None, self.tenant_id, PROJECT, operation.id))
             await self._event(connection, task, "operation.cancel_resolved", {"operation_id": operation.id})
+            await connection.execute("UPDATE testpilot.external_jobs SET state=CASE WHEN state='SUCCEEDED' THEN state ELSE 'CANCELLED' END WHERE tenant_id=%s AND project_id=%s AND operation_id=%s", (self.tenant_id, PROJECT, operation.id))
+
+    async def park(self, task: TaskRow, operation: OperationRow, pending: PendingExecution,
+                   delay: float = 5) -> None:
+        self._operation_scope(task, operation)
+        if pending.operation_id != operation.id or not 0 <= delay <= 30:
+            raise ValueError("invalid external wait contract")
+        async with self.connection() as connection:
+            fresh = await self._fence(connection, task)
+            cursor = await connection.execute(
+                "INSERT INTO testpilot.external_jobs (tenant_id,project_id,operation_id,task_id,run_id,external_id,state,deadline_at,next_check_at) "
+                "SELECT tenant_id,project_id,id,task_id,run_id,%s,'PENDING',"
+                "LEAST(COALESCE(dispatched_at,clock_timestamp())+interval '60 seconds',%s+interval '120 seconds'),"
+                "LEAST(clock_timestamp()+(%s*interval '1 second'),COALESCE(dispatched_at,clock_timestamp())+interval '60 seconds',%s+interval '120 seconds') "
+                "FROM testpilot.operations WHERE tenant_id=%s AND project_id=%s AND id=%s AND state IN ('DISPATCHING','PENDING','UNKNOWN') "
+                "ON CONFLICT (tenant_id,project_id,operation_id) DO UPDATE SET poll_count=testpilot.external_jobs.poll_count+1,next_check_at=LEAST(EXCLUDED.next_check_at,testpilot.external_jobs.deadline_at) "
+                "WHERE testpilot.external_jobs.external_id=EXCLUDED.external_id AND testpilot.external_jobs.state='PENDING' RETURNING operation_id",
+                (pending.external_run_id, task.created_at, delay, task.created_at, self.tenant_id, PROJECT, operation.id),
+            )
+            if await cursor.fetchone() is None:
+                raise ValueError("Job identity/state drift")
+            await connection.execute("UPDATE testpilot.operations SET state='PENDING' WHERE tenant_id=%s AND project_id=%s AND id=%s", (self.tenant_id, PROJECT, operation.id))
+            state = "CANCELLING" if fresh.cancel_requested else "WAITING_EXTERNAL"
+            await connection.execute("UPDATE testpilot.tasks SET state=%s,lease_owner=NULL,lease_until=NULL,next_wakeup_at=(SELECT next_check_at FROM testpilot.external_jobs WHERE tenant_id=%s AND project_id=%s AND operation_id=%s) WHERE tenant_id=%s AND project_id=%s AND id=%s", (state, self.tenant_id, PROJECT, operation.id, self.tenant_id, PROJECT, task.id))
+            sequence = await self._event(connection, task, "task." + state.lower(), {"operation_id": operation.id, "reason": "EXTERNAL_JOB"})
+            await connection.execute("INSERT INTO testpilot.checkpoints (tenant_id,project_id,task_id,run_id,event_seq,body) VALUES (%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, task.id, task.run_id, sequence, Jsonb(pending.model_dump())))
+
+    async def job_poll(self, task: TaskRow) -> tuple[int, bool]:
+        async with self.connection() as connection:
+            await self._fence(connection, task)
+            cursor = await connection.execute("SELECT j.poll_count,(j.deadline_at<=clock_timestamp() OR t.created_at+interval '120 seconds'<=clock_timestamp()) AS expired FROM testpilot.external_jobs j JOIN testpilot.tasks t ON (t.tenant_id,t.project_id,t.id)=(j.tenant_id,j.project_id,j.task_id) WHERE j.tenant_id=%s AND j.project_id=%s AND j.task_id=%s", (self.tenant_id, PROJECT, task.id))
+            row = await cursor.fetchone()
+            return (int(row["poll_count"]), bool(row["expired"])) if row else (0, False)
+
+    @staticmethod
+    async def _deadline(connection: AsyncConnection[dict[str, Any]], task: TaskRow) -> None:
+        cursor = await connection.execute("SELECT clock_timestamp()>%s+interval '120 seconds' AS expired", (task.created_at,))
+        row = await cursor.fetchone()
+        if row is None or row["expired"]:
+            raise BudgetExhaustedError("task deadline exhausted")
+
+    async def requeue(self, task: TaskRow) -> None:
+        async with self.connection() as connection:
+            fresh = await self._fence(connection, task)
+            state = "CANCELLING" if fresh.cancel_requested else "QUEUED"
+            await connection.execute("UPDATE testpilot.tasks SET state=%s,lease_owner=NULL,lease_until=NULL,next_wakeup_at=NULL WHERE tenant_id=%s AND project_id=%s AND id=%s", (state, self.tenant_id, PROJECT, task.id))
+            await self._event(connection, task, "task.resumed", {"state": state})
+
+    async def progress(self, task: TaskRow, fingerprints: list[str]) -> None:
+        if len(fingerprints) > 16 or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in fingerprints):
+            raise ValueError("invalid progress observation")
+        async with self.connection() as connection:
+            fresh = await self._fence(connection, task)
+            state = ProgressState.model_validate_json(json.dumps(fresh.progress_json))
+            updated = advance(state, fingerprints)
+            await connection.execute("UPDATE testpilot.tasks SET progress_json=%s WHERE tenant_id=%s AND project_id=%s AND id=%s", (Jsonb(updated.model_dump(mode="json")), self.tenant_id, PROJECT, task.id))
+            if updated.stalled and not state.stalled:
+                await self._event(connection, task, "progress.stalled", {"reason": "REPEATED_OR_OSCILLATING_OBSERVATIONS"})
+        if updated.stalled:
+            raise ProgressStalledError("Repeated or oscillating observations without progress")
 
     async def events(self, task: TaskRow, after: int = 0) -> list[dict[str, Any]]:
         async with self.connection() as connection:
-            cursor = await connection.execute("SELECT event_seq,type,public_payload,created_at FROM testpilot.task_events WHERE tenant_id=%s AND project_id=%s AND task_id=%s AND event_seq>%s ORDER BY event_seq LIMIT 100", (self.tenant_id, PROJECT, task.id, after))
+            cursor = await connection.execute("SELECT event_seq,run_id,type,public_payload,created_at FROM testpilot.task_events WHERE tenant_id=%s AND project_id=%s AND task_id=%s AND event_seq>%s ORDER BY event_seq LIMIT 100", (self.tenant_id, PROJECT, task.id, after))
             return await cursor.fetchall()
+
+    async def event_window(self, task: TaskRow) -> tuple[int | None, int | None]:
+        async with self.connection() as connection:
+            cursor = await connection.execute("SELECT min(event_seq) AS first,max(event_seq) AS last FROM testpilot.task_events WHERE tenant_id=%s AND project_id=%s AND task_id=%s", (self.tenant_id, PROJECT, task.id))
+            row = await cursor.fetchone()
+            assert row is not None
+            return row["first"], row["last"]

@@ -3,7 +3,7 @@
 from typing import Protocol
 
 from testpilot.artifacts import ArtifactStore
-from testpilot.domain import ExecutionRecord, Target
+from testpilot.domain import ExecutionRecord, PendingExecution, Target
 
 
 class FixtureExecutor(Protocol):
@@ -13,4 +13,4 @@ class FixtureExecutor(Protocol):
     record: ExecutionRecord | None
     operation_id: str
 
-    async def execute(self) -> ExecutionRecord: ...
+    async def execute(self) -> ExecutionRecord | PendingExecution: ...

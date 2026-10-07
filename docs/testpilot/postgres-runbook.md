@@ -21,7 +21,7 @@ export TESTPILOT_API_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets
 不传 `--durable` 保留旧内存演示模式；传入后 PG 不可用会阻断启动/准入/工具发起，不偷偷回退。
 
 迁移是明确的控制命令，启动不自动执行 DDL。`001_ledger.sql` 与校验和保存于 migrations 表；
-再次执行幂等，改写已应用文件会被拒绝。未来结构变化必须新增迁移和迁移器版本，不能直接编辑发布后的 001。
+再次执行幂等，改写已应用文件会被拒绝。已加入按序校验/应用追加迁移，002 引入异步等待/进展；未来结构变化继续新增迁移，不能编辑发布后的 001/002。
 
 ## 可验证的语义
 
@@ -46,7 +46,7 @@ Docker API 不是通用持久幂等服务，不能据此声称任意 CI/缺陷�
 
 沿用 [Task API](openapi-postgres.json)。新增 `GET /health/ready` 与 scoped
 `GET /v1/tasks/<task_id>/events?after=<event_seq>`，返回最多 100 条按序持久事件。
-这是分页事件读取，不是 SSE；outbox 已原子写入，但外部 relay 尚未实现。
+此端点仍为分页读取；新增 events/stream SSE 的重连/权限语义见 async-runbook.md。outbox 外部 relay 尚未实现。
 Checkpoint 含私有消息/Provider 数据，不通过公共事件接口展示。
 
 取消首先持久化 CANCELLING，返回 202；Worker 停止匹配 Job，向 Docker 确认终态后才记录 CANCELLED。
@@ -78,9 +78,9 @@ SIGKILL 留下租约，到期后新 Worker 接管。恢复需同一产物目录�
 
 ## 当前范围
 
-模型预算为跨恢复最多 4 个主循环迭代，执行片段启动前预留/计费，失败可能保守占用一轮。
+模型预算为跨恢复最多 4 个主循环迭代，每个主循环模型请求前预留/计费，失败可能保守占用一轮。
 Provider 内部有限重试/length recovery 的物理请求数、token/费用预算尚未纳入此计数；属于 M4。
 任务截止按原创建时间计算 120 秒，恢复不重置；对账/取消有独立的有界控制等待。
 恢复重建原目标和可信 operation 事实，保留原 checkpoint 供审计；尚未重放完整 Plan/Provider continuation 状态。
-长 Job 当前仍占 Worker 等待槽；独立 Scheduler、外部等待释放、OIDC/S3、artifact/evidence 独立表、90 天 GC、
+长 Job 现已通过 WAITING_EXTERNAL 释放 Worker，由独立 Scheduler 轮询/清理，见 async-runbook.md。OIDC/S3、artifact/evidence 独立表、90 天 GC、
 全部故障矩阵及企业 Git/CI Adapter 尚未完成，不能标记完整 M2/M3 达成。

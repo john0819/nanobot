@@ -56,7 +56,7 @@ async def wait(client, task_id):
     for _ in range(150):
         response = await client.get(f"/v1/tasks/{task_id}", headers=HEADERS)
         row = await response.json()
-        if row["state"] not in {"QUEUED", "RUNNING", "CANCELLING"}:
+        if row["state"] not in {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "RECONCILING", "CANCELLING"}:
             return row
         await asyncio.sleep(0.05)
     raise AssertionError("durable task stalled")
@@ -122,7 +122,7 @@ async def test_unknown_without_external_job_is_review_not_retry(ledger, tmp_path
 async def test_completed_task_api_restart_retains_report_dedup_and_artifacts(ledger, tmp_path):
     def app():
         return create_app(tokens={TOKEN: Principal("alice", ledger.tenant_id)}, ledger=ledger,
-                          root=tmp_path, image=IMAGE, target=lambda mode: target(ledger, mode), run=run, workers=1)
+                          root=tmp_path, image=IMAGE, target=lambda mode: target(ledger, mode), run=run, workers=1, poll_delay=0.05)
 
     async with TestClient(TestServer(app())) as client:
         created = await client.post("/v1/tasks", json={"mode": "healthy"}, headers=HEADERS)
@@ -167,7 +167,7 @@ async def test_cancel_unknown_absent_job_is_not_falsely_confirmed(ledger, tmp_pa
     await ledger.cancel(created.id, "alice")
     await expire(ledger, old)
     app = create_app(tokens={TOKEN: Principal("alice", ledger.tenant_id)}, ledger=ledger,
-                     root=tmp_path, image=IMAGE, target=lambda mode: target(ledger, mode), run=run, workers=1)
+                     root=tmp_path, image=IMAGE, target=lambda mode: target(ledger, mode), run=run, workers=1, poll_delay=0.05)
     async with TestClient(TestServer(app)) as client:
         task = await wait(client, created.id)
         assert task["state"] == "NEEDS_REVIEW"

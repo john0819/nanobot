@@ -165,6 +165,7 @@ include = [
     "runner/",
     "scripts/testpilot_live_smoke.py",
     "scripts/testpilot_crash_smoke.py",
+    "scripts/testpilot_async_smoke.py",
     "testpilot-compose.yml",
     "nanobot/web/dist/",
     "hatch_build.py",

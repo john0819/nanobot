@@ -32,6 +32,10 @@ flowchart LR
 - `storage/postgres.py` / `storage/001_ledger.sql`：PG Task/Run/Operation/Attempt、租约、幂等、事件/outbox/checkpoint 事务。
 - `durable_api.py` / `durable_runtime.py`：PG 队列轮询、SKIP LOCKED、lease epoch、预算保留和 scoped 状态/报告查询。
 - `recoverable_runner.py`：固定 Job 名持久保留，恢复先对账；结果已提交则回放，未知写不重新提交。
+- `scheduler.py`：独立、无需模型的 Job 轮询/对账/截止清理，可用单独 CLI 进程运行。
+- `runtime_contracts.py`：完整 tool_call/result checkpoint 后 WAIT_EXTERNAL 宿主控制，释放 Agent Worker。
+- `progress.py`：重复观测/A-B 震荡检测，PG 持久记录，停滞时保留真实执行事实与部分报告。
+- `event_stream.py`：scoped SSE、Last-Event-ID 重连、每轮重新授权、无序号心跳与明确 resync。
 - `runner/`：独立执行镜像；运行前校验源码和独立 oracle hash，Docker socket/密钥不进入容器。
 - 固定 oracle 通过真实 HTTP 请求验证读重试、写不重试、路由优先级和限流；Gateway 对 Upstream 也发起真实请求。
 
@@ -89,7 +93,10 @@ PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable`
 - [ ] M1 企业目标接入：Git commit source manifest、服务端身份/环境快照、企业 Runner 契约。
 - [x] M2 子集：PG Task/Run/Operation/Attempt、租约/fencing、Checkpoint、事件/outbox 同事务、原固定 Job 对账。
 - [x] 真实 nanobot SIGKILL/重启：原 Docker Job 数量=1、原请求幂等、预算和租约 epoch 保留。
-- [ ] M2 完整验收：外部等待释放 Worker、独立 Scheduler/Reconciler、完整 F01–F05/F11–F13、S3/GC 与版本化完整上下文恢复。
+- [x] 外部等待释放 Worker、独立 Scheduler/Reconciler、原 Job 终态后才唤醒 Agent。
+- [x] 持久 Progress Guard：重复观测与 A-B 路径震荡；范围是当前工具观测，不代表完整自主 Plan。
+- [x] SSE 重连/断线/权限撤销/resync；报告发布事件在 Evidence Gate 后产生。
+- [ ] M2 完整验收：完整 F01–F05/F11–F13、S3/GC 与版本化完整上下文恢复。
 - [ ] M3：企业授权/审批、取消/进程树确认、外部幂等、rerun 与首轮失败保留、完整 Evidence 类型。
 - [ ] M4：task 级预算、Plan/Progress Guard/上下文、受治理的按需 RAG、真实模型评测。
 - [ ] M5：OIDC、SSE/控制台、真实 GitLab/CI Adapter、容量测量、运维 runbook。
@@ -113,5 +120,8 @@ OAuth introspection 或受信 stdio 配置获得，模型不能传 tenant/ACL pr
 报告/产物/operation 调查记录保留在本地文件中，但它们不是 PostgreSQL 任务账本。
 带 `--durable`：任务/请求 key/原 run/operation/模型主循环预算保存在 PG，同 tenant/project 的有界队列最多 10 个活跃任务。
 Worker 领取用 SKIP LOCKED，默认租约 30 秒、每 10 秒心跳；所有写回/工具准入要求有效 owner/epoch。
+Job 未终态进入 WAITING_EXTERNAL，释放 Worker/租约；Scheduler 以独立租约做单次状态查询，等待时不调用模型。
 Runner Job 保留唯一名称，恢复不重新 start 已有容器，已终态只读真实 JUnit/日志，无法查询则 UNKNOWN/NEEDS_REVIEW。
 当前依赖同一 Docker daemon 和同一持久产物根目录。没有声称跨任意外部系统 exactly-once 或完整企业恢复。
+
+新模块的启动、SSE 和独立 Scheduler 运行方式见 [异步执行 Runbook](async-runbook.md)。

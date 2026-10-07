@@ -43,7 +43,7 @@ def main() -> None:
         socket_handle.bind(("127.0.0.1", 0))
         port = socket_handle.getsockname()[1]
     command = [sys.executable, "-m", "nanobot", "testpilot", "serve", "--durable", "--lease-seconds", "3",
-               "--runner-image", image, "--port", str(port), "--output", str(output / "tasks")]
+               "--runner-image", image, "--job-poll-seconds", "0.1", "--port", str(port), "--output", str(output / "tasks")]
     env = dict(os.environ, TESTPILOT_API_TOKEN=token)
     process: subprocess.Popen[bytes] | None = None
     operation_id: str | None = None
@@ -88,7 +88,7 @@ def main() -> None:
             time.sleep(0.02)
         assert external_id and operation_id, "did not observe a real external Job"
         killed_task = asyncio.run(ledger.get(task_id, "local-reviewer"))
-        assert killed_task is not None and killed_task.state in {"RUNNING", "QUEUED"}, "missed pre-publication kill boundary"
+        assert killed_task is not None and killed_task.state in {"RUNNING", "QUEUED", "WAITING_EXTERNAL", "RECONCILING"}, "missed pre-publication kill boundary"
         killed_operation = asyncio.run(ledger.find_operation(killed_task))
         process = start(output / "after-restart.log")
         final: dict = {}
@@ -96,7 +96,7 @@ def main() -> None:
             _, snapshot = request(port, token, "GET", f"/v1/tasks/{task_id}")
             assert isinstance(snapshot, dict)
             final = snapshot
-            if final["state"] not in {"QUEUED", "RUNNING"}:
+            if final["state"] not in {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "RECONCILING"}:
                 break
             time.sleep(0.1)
         assert final.get("state") == "COMPLETED", final

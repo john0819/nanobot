@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from testpilot.artifacts import MAX_ARTIFACT_BYTES, ArtifactStore
 from testpilot.container_runner import ContainerFixtureExecutor
-from testpilot.domain import ExecutionRecord
+from testpilot.domain import ExecutionRecord, PendingExecution
 from testpilot.execution import EXPECTED_CASES
 from testpilot.storage.postgres import OperationRow, TaskRow
 
@@ -87,6 +87,8 @@ class RetainedRunner:
         if len(items) != 1:
             raise UnknownDispatchError("invalid Docker inspection")
         job = items[0]
+        if self.operation.job_external_id is not None and job.Id != self.operation.job_external_id:
+            raise UnknownDispatchError("external Job ID changed")
         if job.Config.Image != self.profile.image or job.Config.Labels.get("testpilot.operation") != self.operation.id:
             raise UnknownDispatchError("external Job identity mismatch")
         if f"TESTPILOT_FIXTURE_MODE={self.task.mode}" not in job.Config.Env or f"TESTPILOT_SUITE_HASH={self.task.target.suite_hash}" not in job.Config.Env:
@@ -94,6 +96,10 @@ class RetainedRunner:
         return job
 
     async def dispatch(self) -> ExecutionRecord:
+        await self.submit()
+        return await self.reconcile()
+
+    async def submit(self) -> ExecutionRecord | PendingExecution:
         self.note_dispatch()
         command = self.profile.command(self.output)[1:]
         command.remove("--rm")
@@ -104,7 +110,7 @@ class RetainedRunner:
         except UnknownDispatchError:
             if await self.inspect() is None:
                 raise
-        return await self.reconcile()
+        return await self.poll()
 
     def note_dispatch(self) -> None:
         self._may_have_dispatched = True
@@ -119,6 +125,14 @@ class RetainedRunner:
                 return await self._record(job)
             await asyncio.sleep(0.2)
         raise UnknownDispatchError("Job deadline reached; retained for operator reconciliation")
+
+    async def poll(self) -> ExecutionRecord | PendingExecution:
+        job = await self.inspect()
+        if job is None:
+            raise UnknownDispatchError("Job absent/unqueryable; no automatic retry")
+        if job.State.Status in {"exited", "dead"}:
+            return await self._record(job)
+        return PendingExecution(operation_id=self.operation.id, external_run_id=job.Id)
 
     async def _record(self, job: Job) -> ExecutionRecord:
         junit = self.output / "junit.xml"
@@ -148,6 +162,8 @@ class RetainedRunner:
                 raise UnknownDispatchError("dispatched Job absent; cancellation cannot rule out late creation")
             return None
         if job.State.Status not in {"exited", "dead"}:
+            if job.State.Status == "paused":
+                await docker("unpause", self.name)
             await docker("stop", "--time", "1", self.name)
         stopped = await self.inspect()
         if stopped is None or stopped.State.Status not in {"exited", "dead"}:

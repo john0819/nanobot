@@ -12,8 +12,10 @@ from pydantic import TypeAdapter, ValidationError
 from testpilot.artifacts import ArtifactStore
 from testpilot.domain import Target
 from testpilot.durable_runtime import DurableTaskRunner, WorkerPool
+from testpilot.event_stream import stream
 from testpilot.execution import FixtureMode
 from testpilot.openapi import document
+from testpilot.scheduler import JobScheduler
 from testpilot.storage.postgres import CapacityReachedError, Ledger, RequestConflictError, TaskRow
 from testpilot.task_api import Principal, TaskRequest
 
@@ -21,17 +23,20 @@ from testpilot.task_api import Principal, TaskRequest
 def create_app(
     *, tokens: dict[str, Principal], ledger: Ledger, root: Path, image: str,
     target: Callable[[FixtureMode], Target], run: DurableTaskRunner,
-    workers: int = 2, lease_seconds: int = 30,
+    workers: int = 2, lease_seconds: int = 30, poll_delay: float = 5,
+    stream_interval: float = 0.5, heartbeat_seconds: float = 20,
+    start_scheduler: bool = True,
 ) -> web.Application:
     if not tokens or any(len(token) < 32 or owner.tenant_id != ledger.tenant_id for token, owner in tokens.items()):
         raise ValueError("strong local identity tokens matching DB scope required")
     root = root.resolve()
-    pool = WorkerPool(ledger, root, image, run, workers, lease_seconds)
+    pool = WorkerPool(ledger, root, image, run, workers, lease_seconds, poll_delay)
+    scheduler = JobScheduler(ledger, root, image, lease_seconds, poll_delay)
 
     def auth(request: web.Request) -> Principal:
         provided = request.headers.get("Authorization", "").encode()
         for token, owner in tokens.items():
-            if hmac.compare_digest(provided, ("Bearer " + token).encode()):
+            if owner.tenant_id == ledger.tenant_id and hmac.compare_digest(provided, ("Bearer " + token).encode()):
                 return owner
         raise web.HTTPUnauthorized(text="Authentication required")
 
@@ -127,11 +132,17 @@ def create_app(
             row["created_at"] = row["created_at"].isoformat()
         return web.json_response({"events": rows})
 
+    async def event_stream(request: web.Request) -> web.StreamResponse:
+        return await stream(request, ledger, get_task, interval=stream_interval, heartbeat_seconds=heartbeat_seconds)
+
     async def startup(_app: web.Application) -> None:
         await pool.start()
+        if start_scheduler:
+            await scheduler.start()
 
     async def shutdown(_app: web.Application) -> None:
         await pool.stop()  # Suspend workers; retained jobs continue and will be reconciled.
+        await scheduler.stop()
 
     app = web.Application(client_max_size=8192, middlewares=[database_errors])
     app.router.add_get("/health/live", health)
@@ -143,6 +154,7 @@ def create_app(
     app.router.add_get("/v1/tasks/{task_id}/artifacts/{hash}", artifact)
     app.router.add_post("/v1/tasks/{task_id}/cancel", cancel)
     app.router.add_get("/v1/tasks/{task_id}/events", events)
+    app.router.add_get("/v1/tasks/{task_id}/events/stream", event_stream)
     app.on_startup.append(startup)
     app.on_cleanup.append(shutdown)
     return app

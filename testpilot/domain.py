@@ -66,6 +66,13 @@ class Claim(Contract):
     value: bool | Counts | str
 
 
+class PendingExecution(Contract):
+    status: Literal["PENDING"] = "PENDING"
+    operation_id: str
+    external_run_id: str
+    summary: str = "Job accepted; execution is not yet complete."
+
+
 class ReportCandidate(Contract):
     task_id: str
     run_id: str

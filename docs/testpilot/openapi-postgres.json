@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TestPilot local Task API",
-    "version": "0.3.0",
-    "description": "PostgreSQL task/operation/lease/event ledger; retained Job reconciliation."
+    "version": "0.4.0",
+    "description": "PG asynchronous Job scheduler, persistent progress guard and authenticated SSE replay."
   },
   "servers": [
     {
@@ -87,6 +87,102 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/events/stream": {
+      "get": {
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized durable SSE; disconnect does not cancel task",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cursor requires resync",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "resync_required",
+                    "snapshot"
+                  ]
                 }
               }
             }
@@ -522,6 +618,19 @@
             "minimum": 0,
             "maximum": 4
           },
+          "waiting_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_wakeup_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
           "task_id": {
             "type": "string"
           },
@@ -529,6 +638,8 @@
             "enum": [
               "QUEUED",
               "RUNNING",
+              "WAITING_EXTERNAL",
+              "RECONCILING",
               "CANCELLING",
               "COMPLETED",
               "NEEDS_REVIEW",

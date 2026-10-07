@@ -12,8 +12,8 @@ def document(durable: bool = False) -> dict[str, object]:
         return {"description": description, "content": content}
 
     return {
-        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.3.0" if durable else "0.2.0",
-                                     "description": "PostgreSQL task/operation/lease/event ledger; retained Job reconciliation." if durable else "Loopback development only. In-memory task state; no durable recovery."},
+        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.4.0" if durable else "0.2.0",
+                                     "description": "PG asynchronous Job scheduler, persistent progress guard and authenticated SSE replay." if durable else "Loopback development only. In-memory task state; no durable recovery."},
         "servers": [{"url": "http://127.0.0.1:8920"}],
         "security": [{"LocalBearer": []}],
         "paths": {
@@ -22,6 +22,16 @@ def document(durable: bool = False) -> dict[str, object]:
                 "/v1/tasks/{task_id}/events": {"get": {
                     "parameters": [task_id, {"name": "after", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}}],
                     "responses": {"200": response("Scoped durable events ordered by sequence", {"application/json": {"schema": {"type": "object", "required": ["events"]}}}), "401": error, "404": error, "422": error, "503": error},
+                }},
+                "/v1/tasks/{task_id}/events/stream": {"get": {
+                    "parameters": [task_id,
+                                   {"name": "Last-Event-ID", "in": "header", "schema": {"type": "integer", "minimum": 0}},
+                                   {"name": "after", "in": "query", "schema": {"type": "integer", "minimum": 0}}],
+                    "responses": {
+                        "200": response("Authorized durable SSE; disconnect does not cancel task", {"text/event-stream": {"schema": {"type": "string"}}}),
+                        "401": error, "404": error, "409": {"description": "Cursor requires resync", "content": {"application/json": {"schema": {"type": "object", "required": ["resync_required", "snapshot"]}}}},
+                        "422": error, "503": error,
+                    },
                 }},
             } if durable else {}),
             "/health/live": {"get": {"security": [], "responses": {"200": {"description": "Process healthy"}}}},
@@ -58,9 +68,10 @@ def document(durable: bool = False) -> dict[str, object]:
                 "TaskSnapshot": {"type": "object", "required": ["task_id", "state", "mode", "created_at", "error", "report_ready", "operation_id"] + (["run_id", "lease_epoch", "model_rounds"] if durable else []),
                                  "properties": {
                                      **({"run_id": {"type": "string"}, "lease_epoch": {"type": "integer", "minimum": 0},
-                                         "model_rounds": {"type": "integer", "minimum": 0, "maximum": 4}} if durable else {}),
+                                         "model_rounds": {"type": "integer", "minimum": 0, "maximum": 4},
+                                         "waiting_reason": {"type": ["string", "null"]}, "next_wakeup_at": {"type": ["string", "null"], "format": "date-time"}} if durable else {}),
                                      "task_id": {"type": "string"},
-                                     "state": {"enum": ["QUEUED", "RUNNING", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]},
+                                     "state": {"enum": ["QUEUED", "RUNNING", "WAITING_EXTERNAL", "RECONCILING", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]},
                                      "mode": {"enum": ["healthy", "retry-write-bug"]},
                                      "created_at": {"type": "string", "format": "date-time"},
                                      "error": {"type": ["string", "null"]}, "report_ready": {"type": "boolean"},
