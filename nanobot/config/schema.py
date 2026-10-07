@@ -4,7 +4,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
-from pydantic import AliasChoices, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nanobot.config.timezone import detect_system_timezone
@@ -350,6 +358,34 @@ class ApiConfig(Base):
         )
 
 
+class TestPilotConfig(Base):
+    """Explicit enterprise-extension settings; secrets never enter task/model context."""
+
+    development: bool = True
+    require_approval: bool = False
+    model_limit: int = Field(default=12, ge=4, le=40)
+    jwt_issuer: str | None = None
+    jwt_audience: str | None = None
+    jwks_file: str | None = None
+    s3_endpoint: str | None = None
+    s3_region: str = "garage"
+    s3_bucket: str = "testpilot-artifacts"
+    s3_access_key: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
+    s3_secret_key: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
+    knowledge_endpoint: str | None = None
+    knowledge_actor_tokens: dict[str, SecretStr] = Field(default_factory=dict, repr=False)
+
+    @model_validator(mode="after")
+    def complete_identity_and_storage(self) -> "TestPilotConfig":
+        if any((self.jwt_issuer, self.jwt_audience, self.jwks_file)) and not all((self.jwt_issuer, self.jwt_audience, self.jwks_file)):
+            raise ValueError("JWT issuer/audience/JWKS must be configured together")
+        if self.s3_endpoint and not (self.s3_access_key.get_secret_value() and self.s3_secret_key.get_secret_value()):
+            raise ValueError("S3 credentials required")
+        if not self.development and (not self.jwt_issuer or not self.s3_endpoint):
+            raise ValueError("Shared profile requires verified identity and object storage")
+        return self
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
@@ -429,6 +465,7 @@ class Config(BaseSettings):
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    testpilot: TestPilotConfig = Field(default_factory=TestPilotConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(

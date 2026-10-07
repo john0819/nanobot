@@ -1,0 +1,17 @@
+{
+  "testpilot": {
+    "development": false,
+    "requireApproval": true,
+    "modelLimit": 12,
+    "jwtIssuer": "https://identity.example.com",
+    "jwtAudience": "testpilot",
+    "jwksFile": "/run/secrets/testpilot-jwks.json",
+    "s3Endpoint": "https://objects.example.com",
+    "s3Region": "us-east-1",
+    "s3Bucket": "testpilot-artifacts",
+    "s3AccessKey": "REPLACE_WITH_SECRET",
+    "s3SecretKey": "REPLACE_WITH_SECRET",
+    "knowledgeEndpoint": "https://kb.example.com/mcp",
+    "knowledgeActorTokens": {"employee-subject-id": "REPLACE_WITH_ACTOR_BOUND_KB_TOKEN"}
+  }
+}

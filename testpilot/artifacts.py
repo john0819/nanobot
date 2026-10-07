@@ -9,6 +9,10 @@ from uuid import uuid4
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 
 
+class ArtifactUnavailableError(RuntimeError):
+    pass
+
+
 def digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -40,7 +44,7 @@ class ArtifactStore:
             try:
                 os.link(temporary, path)  # Publish complete bytes atomically without replacing immutable content.
             except FileExistsError:
-                if self.read(content_hash) != content:
+                if ArtifactStore.read(self, content_hash) != content:
                     raise ValueError("artifact collision or corruption") from None
             if os.name != "nt":
                 descriptor = os.open(self.root, os.O_RDONLY)

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TestPilot local Task API",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "PG asynchronous Job scheduler, persistent progress guard and authenticated SSE replay."
   },
   "servers": [
@@ -16,6 +16,182 @@
     }
   ],
   "paths": {
+    "/v1/tasks/{task_id}/approval": {
+      "get": {
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical execution request; owner or project reviewer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Independent decision recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/plan": {
+      "get": {
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted bounded plan version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health/ready": {
       "get": {
         "security": [],
@@ -334,6 +510,49 @@
             }
           }
         }
+      },
+      "get": {
+        "parameters": [
+          {
+            "name": "review",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner task list or role-gated pending review queue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/tasks/{task_id}": {
@@ -586,9 +805,50 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "goal": {
+            "default": "Validate gateway fixture",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "require_approval": {
+            "default": false,
+            "title": "Require Approval",
+            "type": "boolean"
+          },
+          "require_knowledge": {
+            "default": false,
+            "title": "Require Knowledge",
+            "type": "boolean"
           }
         },
         "title": "TaskRequest",
+        "type": "object"
+      },
+      "ApprovalDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "request_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "DENY"
+            ],
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_hash",
+          "decision"
+        ],
+        "title": "ApprovalDecision",
         "type": "object"
       },
       "TaskSnapshot": {
@@ -616,7 +876,7 @@
           "model_rounds": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 4
+            "maximum": 40
           },
           "waiting_reason": {
             "type": [
@@ -637,6 +897,7 @@
           "state": {
             "enum": [
               "QUEUED",
+              "WAITING_APPROVAL",
               "RUNNING",
               "WAITING_EXTERNAL",
               "RECONCILING",

@@ -1,5 +1,33 @@
 # TestPilot 验证记录
 
+## 第五批：治理、知识与团队操作入口
+
+日期：2026-10-07。新增 S3 远端证据、JWT/角色、独立持久审批、Plan/Context、任务级 RAG 与控制台。
+
+| 检查 | 实际结果 |
+|---|---|
+| TestPilot 全集（真实 PG/Docker） | **95 passed** |
+| 最近上游 Runner/QA 兼容集 | **66 passed**，0.43 秒 |
+| Ruff / strict BasedPyright / JS 语法 | 全通过 / 0 errors / node --check 通过 |
+| SQL 迁移 | 追加 003/004，001/002 不修改；原数据保留 |
+| JWT | issuer/aud/exp/nbf/tenant/project/算法/外来 key URL 拒绝、撤销与 key 轮换 |
+| 审批 | 批准前零模型/零 Job、executor 不能审批、独立审核/hash、一次消费、拒绝/过期、幂等 payload 冲突 |
+| 对象存储 | 实际 Garage v2.4.1 条件写/重复写/读回；单测覆盖 scope、hash 篡改和禁止缓存回退 |
+| RAG | 实际 qa-kb-service PG/ES/Qdrant + 20 文档/101 chunks；免费 fake embedding/rerank；认证 HTTP MCP |
+| 控制台 | 静态资源/security headers/API 401；JS 语法验证；未运行浏览器交互自动化 |
+| 免费全链路 | 2 任务通过，审批→Plan→RAG→Docker pytest→S3→报告 |
+| 最终少量真实模型验收 | DeepSeek 配置模型，正常 4 PASS / 缺陷 3 PASS 1 FAIL，两报告有效；各 5 模型轮次，各 2 知识记录；各 11.83 秒 |
+| 批量评测 | 提供 --repeats 命令，本轮未运行；没有 held-out 成功率结论 |
+| wheel | TestPilot 控制台资源/迁移包含在 wheel；上游 WebUI npm 构建失败，使用既有 NANOBOT_SKIP_WEBUI_BUILD=1 验证 Python 包 |
+
+最终真实模型结果文件：`.local/testpilot-governed-smoke/b78fd5398f0b4b5ebd26cac0857a24dd/summary.json`。
+真实身份系统为本地签名/introspection 测试替身，不能冒充公司 IdP 已接入。
+前期少量模型验收暴露两类集成问题：provider 私有 continuation 对象无法 JSON 序列化；候选外包 JSON 围栏。
+通过上游私有记录合同转换、完整消息围栏规范化解决，均增加确定性回归。未修正声明值或放宽 Evidence Gate。
+这些失败任务保持 NEEDS_REVIEW，未把它们隐去并统计为自主性成功率。
+
+新增能力与部署限制见 [治理 Runbook](governance-runbook.md)，阶段缺口见 [交付清单](README.md)。
+
 ## 第四批：四个关联模块
 
 日期：2026-10-07。交付 Async Runtime Yield、独立 Job Scheduler、持久 Progress Guard 与 SSE。

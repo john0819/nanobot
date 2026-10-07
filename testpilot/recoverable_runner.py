@@ -141,13 +141,14 @@ class RetainedRunner:
         content_hash: str | None = None
         if junit.is_file():
             with junit.open("rb") as stream:
-                content_hash = self.store.put(stream.read(MAX_ARTIFACT_BYTES + 1))
+                content_hash = await asyncio.to_thread(self.store.put, stream.read(MAX_ARTIFACT_BYTES + 1))
         logs = await docker("logs", self.name)
+        log_hash = await asyncio.to_thread(self.store.put, logs)
         return ExecutionRecord(
             evidence_id="ev_" + self.operation.id[3:], task_id=self.task.id, run_id=self.task.run_id,
             external_run_id=job.Id, operation_id=self.operation.id, target=self.task.target,
             state="COMPLETED", exit_code=job.State.ExitCode, expected_cases=EXPECTED_CASES,
-            junit_hash=content_hash, log_hash=self.store.put(logs),
+            junit_hash=content_hash, log_hash=log_hash,
             observed_at=datetime.now(timezone.utc).isoformat(), source_system="isolated-container-fixture",
         )
 

@@ -382,6 +382,23 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "goal": {
+            "default": "Validate gateway fixture",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "require_approval": {
+            "default": false,
+            "title": "Require Approval",
+            "type": "boolean"
+          },
+          "require_knowledge": {
+            "default": false,
+            "title": "Require Knowledge",
+            "type": "boolean"
           }
         },
         "title": "TaskRequest",
@@ -405,7 +422,11 @@
           "state": {
             "enum": [
               "QUEUED",
+              "WAITING_APPROVAL",
               "RUNNING",
+              "WAITING_EXTERNAL",
+              "RECONCILING",
+              "CANCELLING",
               "COMPLETED",
               "NEEDS_REVIEW",
               "CANCELLED"

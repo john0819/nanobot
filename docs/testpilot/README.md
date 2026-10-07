@@ -42,7 +42,9 @@ flowchart LR
 这是 **M0 + M1 本地固定目标纵切 + 模块 E 的首个可运行子集**。
 已实现 Task API、HTTP 被测 gateway 和独立容器 Runner；目标仍是工作树固定 fixture，
 第三批已接入 PostgreSQL 任务事实源及固定 Job crash recovery。
-尚未接入企业 Git commit manifest、S3、OIDC；不是完整 M2/M3。
+第五批已接入 S3、JWT 身份、持久审批、Plan/Context 和任务级 RAG，并提供 `/console`。
+启动、权限和评测命令见 [治理 Runbook](governance-runbook.md)。企业 Git commit manifest、完整 OIDC、
+通用企业 Runner 与完整故障矩阵仍未完成，不能把本地固定目标验收当完整 M2–M5。
 
 ## 运行
 
@@ -96,7 +98,11 @@ PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable`
 - [x] 外部等待释放 Worker、独立 Scheduler/Reconciler、原 Job 终态后才唤醒 Agent。
 - [x] 持久 Progress Guard：重复观测与 A-B 路径震荡；范围是当前工具观测，不代表完整自主 Plan。
 - [x] SSE 重连/断线/权限撤销/resync；报告发布事件在 Evidence Gate 后产生。
-- [ ] M2 完整验收：完整 F01–F05/F11–F13、S3/GC 与版本化完整上下文恢复。
+- [x] S3 条件写/远端读回/hash/任务路径隔离；实际 Garage 对象存储验收。
+- [x] JWT 固定签名算法与 scope；独立审核、hash 绑定、派发事务一次消费、拒绝/过期。
+- [x] 有界 Plan 版本、保护 Context/实际模型输入预算、分页产物、actor-bound MCP RAG。
+- [x] 最小控制台：创建/任务列表/审批/Plan/SSE/报告/证据/取消。
+- [ ] M2 完整验收：完整 F01–F05/F11–F13、GC 与版本化完整上下文恢复。
 - [ ] M3：企业授权/审批、取消/进程树确认、外部幂等、rerun 与首轮失败保留、完整 Evidence 类型。
 - [ ] M4：task 级预算、Plan/Progress Guard/上下文、受治理的按需 RAG、真实模型评测。
 - [ ] M5：OIDC、SSE/控制台、真实 GitLab/CI Adapter、容量测量、运维 runbook。
@@ -108,8 +114,8 @@ PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable`
 
 保持独立仓库。RAG 已通过 MCP 提供 `search`、版本/引用、上下文和降级状态，身份从服务端
 OAuth introspection 或受信 stdio 配置获得，模型不能传 tenant/ACL principal。
-当前证据任务只有固定 fixture 工具；尚未把 RAG 工具注册进该任务目录。
-后续先完成 task-scoped 的 MCP 治理再接入，而不是直接开放 nanobot 所有工具。
+任务级 RAG 已通过受控 MCP search 接入，服务端映射 actor 到 KB token；返回内容不授予权限。
+完整引用保存为远端产物，要求知识的任务在拿到授权证据前不能派发 Job。
 知识引用支撑“规范要求写请求不能重试”；completed run + JUnit 才能支撑“本次写请求测试失败”。
 
 ## 当前任务服务的生命周期

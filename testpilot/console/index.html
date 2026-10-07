@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TestPilot 工程测试控制台</title><link rel="stylesheet" href="/console/style.css">
+<body><header><h1>TestPilot</h1><p>工程测试任务、执行证据与独立审批</p></header>
+<main>
+<section><h2>连接身份</h2><label>访问令牌 <input id="token" type="password" autocomplete="off" placeholder="IdP 签发的 Bearer Token"></label>
+<button id="connect">连接</button><button id="logout">清除身份</button><p>令牌仅保存在当前页面内存。审批时切换到独立审核人的身份。</p></section>
+<section><h2>创建测试任务</h2><label>测试目标 <textarea id="goal" maxlength="1000">Validate gateway retry semantics with an evidence-backed plan</textarea></label>
+<label>场景 <select id="mode"><option value="healthy">正常回归</option><option value="retry-write-bug">写重试缺陷回归</option></select></label>
+<label><input id="approval" type="checkbox" checked>要求独立审批</label><label><input id="knowledge" type="checkbox">要求知识库证据</label><button id="create">创建任务</button></section>
+<section><h2>任务列表</h2><button id="refresh">我的任务</button><button id="review">待审批任务</button><div id="tasks"></div></section>
+<section><h2>任务详情</h2><label>任务 ID <input id="task-id"></label><button id="load">查看任务</button><button id="cancel">取消任务</button>
+<p id="stream-status" role="status"></p><pre id="snapshot"></pre><h3>计划</h3><pre id="plan"></pre>
+<h3>审批内容</h3><p>审核目标、执行镜像和请求摘要后提交。相同申请人不能批准自己的任务。</p><pre id="approval-detail"></pre><button id="approve">批准</button><button id="deny">拒绝</button>
+<h3>事件时间线</h3><ol id="events"></ol><h3>验证报告</h3><pre id="report"></pre><div id="artifacts"></div></section>
+<p id="notice" role="alert"></p>
+</main><script src="/console/app.js" defer></script></body></html>

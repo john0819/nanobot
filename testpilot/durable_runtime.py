@@ -1,6 +1,9 @@
 """PG-owned Worker leases and operation replay/reconciliation around nanobot."""
 
 import asyncio
+import json
+import logging
+import traceback
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,9 +11,11 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
-from testpilot.artifacts import ArtifactStore
+from testpilot.artifacts import ArtifactStore, ArtifactUnavailableError
+from testpilot.context import ContextBlock, ContextBudgetError, select
 from testpilot.domain import ExecutionRecord, PendingExecution
 from testpilot.evidence import build_report, check_execution
+from testpilot.knowledge import KnowledgeUnavailableError, MCPKnowledgeClient, evidence
 from testpilot.progress import ProgressStalledError
 from testpilot.recoverable_runner import RetainedRunner, UnknownDispatchError
 from testpilot.runtime_contracts import RunControls, RuntimeYieldError
@@ -21,6 +26,7 @@ from testpilot.storage.postgres import (
     OperationRow,
     TaskRow,
 )
+from testpilot.storage_contracts import ArtifactFactory, local_artifacts
 
 DurableTaskRunner = Callable[["DurableExecutor", RunControls], Awaitable[dict[str, object]]]
 
@@ -42,7 +48,7 @@ class DurableExecutor:
         async with self._lock:
             await self.ledger.heartbeat(self.task, self.lease_seconds)
             if self.record is not None:
-                check = check_execution(self.record, self.store, self.task_id, self.target)
+                check = await asyncio.to_thread(check_execution, self.record, self.store, self.task_id, self.target)
                 if check.gaps:
                     raise UnknownDispatchError("stored execution evidence invalid")
                 return self.record
@@ -50,6 +56,8 @@ class DurableExecutor:
                 return self.pending
             try:
                 if self.operation.state == "PREPARED":
+                    if self.task.knowledge_required and not await self.ledger.knowledge_ids(self.task):
+                        raise KnowledgeUnavailableError("Required authorized knowledge missing")
                     await self.ledger.dispatch(self.task, self.operation)
                     self.backend.note_dispatch()
                     # Fail closed if PG/lease is unavailable immediately before invoking Docker.
@@ -73,12 +81,15 @@ class DurableExecutor:
 
 class WorkerPool:
     def __init__(self, ledger: Ledger, root: Path, image: str, run: DurableTaskRunner,
-                 workers: int = 2, lease_seconds: int = 30, poll_delay: float = 5) -> None:
+                 workers: int = 2, lease_seconds: int = 30, poll_delay: float = 5,
+                 artifacts: ArtifactFactory = local_artifacts, knowledge: MCPKnowledgeClient | None = None) -> None:
         if not 1 <= workers <= 4 or not 1 <= lease_seconds <= 300:
             raise ValueError("invalid worker configuration")
         self.ledger, self.root, self.image, self.run = ledger, root.resolve(), image, run
         self.workers, self.lease_seconds = workers, lease_seconds
         self.poll_delay = poll_delay
+        self.artifacts = artifacts
+        self.knowledge = knowledge
         self._tasks: list[asyncio.Task[None]] = []
         self.stopping = False
 
@@ -147,7 +158,7 @@ class WorkerPool:
 
         timer = asyncio.create_task(heartbeat())
         try:
-            store = ArtifactStore(self.root / self.ledger.tenant_id / task.id / "artifacts")
+            store = self.artifacts(self.root, self.ledger.tenant_id, task.id)
             operation = await self.ledger.find_operation(task) if cancel else await self.ledger.operation(task)
             if operation is not None:
                 backend = RetainedRunner(task, operation, store, self.image, self.root / "jobs" / self.ledger.tenant_id)
@@ -156,20 +167,43 @@ class WorkerPool:
                 await cleanup_cancel()
                 return
             assert executor is not None
+            async def search(query: str):
+                if self.knowledge is None:
+                    raise KnowledgeUnavailableError("Knowledge connection not configured")
+                result = await self.knowledge.search(query, task.tenant_id, task.actor_id)
+                content_hash = await asyncio.to_thread(store.put, result.model_dump_json().encode())
+                await self.ledger.save_knowledge(task, evidence(result, content_hash))
+                return result.model_copy(update={"artifact_hash": content_hash})
             if operation is not None and operation.state in {"DISPATCHING", "PENDING", "UNKNOWN", "SUCCEEDED"}:
                 # Resolve external facts first, including after model budget exhaustion.
                 # This path can only replay/reconcile; it cannot create another Job.
                 observation = await executor.execute()
                 if isinstance(observation, PendingExecution):
                     raise RuntimeYieldError(observation)
-            remaining = (task.created_at + timedelta(seconds=120) - datetime.now(timezone.utc)).total_seconds()
-            if remaining <= 0 or task.model_rounds >= 4:
+            remaining = ((task.activated_at or task.created_at) + timedelta(seconds=120) - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0 or task.model_rounds >= task.model_limit:
                 raise BudgetExhaustedError("task budget exhausted")
+            latest_plan = await self.ledger.latest_plan(task)
+            context_blocks = (ContextBlock(block_id="task", kind="TASK", text=json.dumps({
+                "task_id": task.id, "run_id": task.run_id, "goal": task.goal, "target": task.target.model_dump(),
+                "knowledge_required": task.knowledge_required, "known_knowledge_refs": await self.ledger.knowledge_ids(task),
+                "allowed_actions": ["run_gateway_fixture", "search_knowledge", "inspect_result", "publish_report"]}),
+                pinned=True, trust_level="SERVER_FACT", priority=100),
+                ContextBlock(block_id="plan", kind="PLAN", text=json.dumps(latest_plan), priority=50))
+            projection, _ = select(context_blocks, 4000)
+            async def artifact_allowed(content_hash: str) -> bool:
+                return content_hash in await self.ledger.knowledge_artifacts(task)
+
             controls = RunControls(
                 checkpoint=lambda body: self.ledger.checkpoint(task, body),
                 before_model=lambda: self.ledger.reserve_round(task),
-                max_iterations=4-task.model_rounds,
+                max_iterations=task.model_limit-task.model_rounds,
                 progress=lambda fingerprints: self.ledger.progress(task, fingerprints),
+                plan=lambda plan: self.ledger.save_plan(task, plan),
+                task_context=projection,
+                enable_planning=task.goal != "Validate gateway fixture" or task.knowledge_required,
+                knowledge=search if self.knowledge else None,
+                artifact_allowed=artifact_allowed,
             )
             report = await asyncio.wait_for(self.run(executor, controls), remaining)
             fresh = await self.ledger.heartbeat(task, self.lease_seconds)
@@ -179,8 +213,13 @@ class WorkerPool:
             else:
                 report["model_rounds"] = fresh.model_rounds
                 report["storage_profile"] = "postgres"
+                report["knowledge_evidence_ids"] = await self.ledger.knowledge_ids(task)
+                refs = TypeAdapter(list[str]).validate_python(report.get("artifact_refs", []), strict=True)
+                report["artifact_refs"] = refs + await self.ledger.knowledge_artifacts(task)
                 limits = TypeAdapter(list[str]).validate_python(report.get("limitations", []), strict=True)
                 report["limitations"] = [line.replace("不提供持久任务恢复", "通过 PG 账本恢复和原 Job 对账，完整故障矩阵尚未覆盖") for line in limits]
+                if report["knowledge_evidence_ids"]:
+                    report["limitations"] = [line.replace("未验证真实 LLM 自主规划效果，RAG 本次未参与执行证据判定。", "知识库提供版本化背景证据；执行结论仍由真实 JUnit 和固定断言决定，自主规划效果需批量评测。") for line in report["limitations"]]
                 await self.ledger.finish(task, report)
         except RuntimeYieldError as signal:
             if operation is not None:
@@ -199,13 +238,21 @@ class WorkerPool:
         except LeaseLostError:
             pass  # Never let an old worker publish or mutate after takeover.
         except Exception as error:
+            # Diagnostic code locations only: exception text may contain tool inputs or credentials.
+            logging.getLogger(__name__).error("TestPilot failure task=%s type=%s trace=%s", task.id,
+                                              type(error).__name__, "".join(traceback.format_tb(error.__traceback__)))
             try:
                 if executor is not None:
                     operation = await self.ledger.find_operation(task)
                     record = operation.execution() if operation else None
-                    report = build_report(task_id=task.id, target=task.target, record=record,
-                                          store=executor.store, candidate_json=None, runner_stop_reason="interrupted")
-                    code = "PROGRESS_STALLED" if isinstance(error, ProgressStalledError) else "OPERATION_UNKNOWN" if isinstance(error, UnknownDispatchError) else "TASK_BUDGET" if isinstance(error, (BudgetExhaustedError, TimeoutError)) else "TASK_EXECUTION_UNRESOLVED"
+                    try:
+                        report = build_report(task_id=task.id, target=task.target, record=record,
+                                              store=executor.store, candidate_json=None, runner_stop_reason="interrupted")
+                    except ArtifactUnavailableError:
+                        # Cannot verify remote evidence; publish no test counts and still terminate safely.
+                        report = build_report(task_id=task.id, target=task.target, record=None,
+                                              store=executor.store, candidate_json=None, runner_stop_reason="interrupted")
+                    code = "ARTIFACT_UNAVAILABLE" if isinstance(error, ArtifactUnavailableError) else "KNOWLEDGE_UNAVAILABLE" if isinstance(error, KnowledgeUnavailableError) else "CONTEXT_BUDGET" if isinstance(error, ContextBudgetError) else "PROGRESS_STALLED" if isinstance(error, ProgressStalledError) else "OPERATION_UNKNOWN" if isinstance(error, UnknownDispatchError) else "TASK_BUDGET" if isinstance(error, (BudgetExhaustedError, TimeoutError)) else "TASK_EXECUTION_UNRESOLVED"
                     await self.ledger.finish(task, report, code)
                 else:
                     await self.ledger.finish(task, error="CANCELLATION_UNCONFIRMED" if cancel else "TARGET_OR_RUNTIME_INCOMPATIBLE")

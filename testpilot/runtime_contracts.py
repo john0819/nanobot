@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from testpilot.domain import PendingExecution
+from testpilot.governance import TaskPlan
+from testpilot.knowledge import KnowledgeResult
 
 
 class RuntimeYieldError(RuntimeError):
@@ -21,3 +23,8 @@ class RunControls:
     before_model: Callable[[], Awaitable[None]]
     max_iterations: int
     progress: Callable[[list[str]], Awaitable[None]] | None = None
+    plan: Callable[[TaskPlan], Awaitable[int]] | None = None
+    task_context: str | None = None
+    enable_planning: bool = False
+    knowledge: Callable[[str], Awaitable[KnowledgeResult]] | None = None
+    artifact_allowed: Callable[[str], Awaitable[bool]] | None = None

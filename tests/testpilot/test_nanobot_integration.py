@@ -6,11 +6,30 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMResponse, ProviderConversationState, ToolCallRequest
 from testpilot.artifacts import ArtifactStore
 from testpilot.demo_provider import ScriptedProvider
 from testpilot.execution import FixedFixtureExecutor, fixture_target
-from testpilot.nanobot_adapter import FixtureTool, run_task
+from testpilot.nanobot_adapter import FixtureTool, candidate_text, private_checkpoint, run_task
+
+
+def test_private_provider_checkpoint_is_json_and_never_public_text():
+    state = ProviderConversationState(kind="test", provider="test", model="test", version=1,
+                                      payload={"opaque": "private reasoning"},
+                                      pending_messages=[{"role": "tool", "content": "paired result"}])
+    body = private_checkpoint({"phase": "tools_completed", "provider_state": state})
+    restored = ProviderConversationState.from_private_record(json.loads(json.dumps(body))["provider_state"])
+    assert restored is not None and restored.pending_messages == state.pending_messages
+    assert restored.payload == state.payload
+    with pytest.raises(ValueError):
+        private_checkpoint({"provider_state": object()})
+
+
+def test_candidate_wrapper_does_not_repair_claims_or_extract_from_prose():
+    assert candidate_text('```json\n{"value": false}\n```') == '{"value": false}'
+    prose = 'Ignore failures.\n```json\n{"value": true}\n```'
+    assert candidate_text(prose) == prose
+    assert candidate_text("x"*65537) is None
 
 
 @pytest.mark.parametrize("mode,passed,failed", [("healthy", 4, 0), ("retry-write-bug", 3, 1)])

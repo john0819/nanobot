@@ -47,6 +47,45 @@ async def test_request_dedup_survives_repository_restart_and_conflicts(ledger):
     assert await Ledger(DSN, "other_tenant").get(task.id, "alice") is None
 
 
+async def test_approval_independent_reviewer_hash_single_consumption_and_plan(ledger):
+    from testpilot.governance import ApprovalDeniedError, TaskPlan
+
+    task, _ = await ledger.admit("alice", "approval", "healthy", target(ledger), approval_required=True)
+    assert task.state == "WAITING_APPROVAL" and task.activated_at is None
+    assert await ledger.claim("worker") is None
+    approval = await ledger.approval(task.id)
+    with pytest.raises(ApprovalDeniedError):
+        await ledger.decide(task.id, "alice", approval["request_hash"], True)
+    with pytest.raises(RequestConflictError):
+        await ledger.decide(task.id, "bob", "0"*64, True)
+    await ledger.decide(task.id, "bob", approval["request_hash"], True)
+    lease = await ledger.claim("worker")
+    assert lease.activated_at is not None
+    plan = TaskPlan.model_validate({"steps": ({"id": "report", "action": "publish_report", "rationale": "gate"},)})
+    assert await ledger.save_plan(lease, plan) == 1
+    assert (await ledger.latest_plan(lease))["version"] == 1
+    operation = await ledger.operation(lease)
+    await ledger.dispatch(lease, operation)
+    assert (await ledger.approval(task.id))["consumed_operation_id"] == operation.id
+    with pytest.raises(ApprovalDeniedError):
+        await ledger.dispatch(lease, operation)
+
+
+async def test_approval_expiry_denial_and_payload_dedup(ledger):
+    task, _ = await ledger.admit("alice", "expired", "healthy", target(ledger), approval_required=True)
+    with pytest.raises(RequestConflictError):
+        await ledger.admit("alice", "expired", "healthy", target(ledger), goal="changed", approval_required=True)
+    async with ledger.connection() as connection:
+        await connection.execute("UPDATE testpilot.approvals SET expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=%s AND task_id=%s", (ledger.tenant_id, task.id))
+    assert await ledger.expire_approvals() == 1
+    assert await ledger.expire_approvals() == 0
+    assert (await ledger.get(task.id, "alice")).error == "APPROVAL_EXPIRED"
+    denied, _ = await ledger.admit("alice", "denied", "healthy", target(ledger), approval_required=True)
+    await ledger.decide(denied.id, "bob", (await ledger.approval(denied.id))["request_hash"], False)
+    assert (await ledger.get(denied.id, "alice")).error == "APPROVAL_DENIED"
+    assert await ledger.claim("worker") is None
+
+
 async def test_concurrent_admission_is_unique_and_quota_atomic(ledger):
     requests = await asyncio.gather(*[ledger.admit("alice", "one", "healthy", target(ledger), max_active=1) for _ in range(5)])
     assert len({result[0].id for result in requests}) == 1

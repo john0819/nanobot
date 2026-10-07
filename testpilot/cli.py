@@ -28,6 +28,7 @@ def serve(
     job_poll_seconds: float = typer.Option(5, min=0.01, max=30, help="Scheduler base poll delay; grows to 3x/6x, capped at 30s"),
     workers: int = typer.Option(2, min=1, max=4),
     scheduler: bool = typer.Option(True, "--scheduler/--no-scheduler", help="Run the Job scheduler in this process"),
+    settings: Path | None = typer.Option(None, help="Nanobot config containing testpilot identity/storage/knowledge settings; independent of model"),
 ) -> None:
     try:
         from aiohttp import web
@@ -35,9 +36,17 @@ def serve(
         from testpilot.task_api import Principal, create_app
     except ImportError:
         raise typer.BadParameter("Install nanobot-ai[api] to run the local Task API") from None
+    from nanobot.config.loader import load_config
+    from nanobot.config.schema import TestPilotConfig
+    from testpilot.settings import artifact_factory, identity_provider, knowledge_client
+
+    extension = load_config(settings or config).testpilot if settings or config else TestPilotConfig()
+    identity = identity_provider(extension)
     token = os.environ.get("TESTPILOT_API_TOKEN", "")
-    if len(token) < 32:
+    if identity is None and len(token) < 32:
         raise typer.BadParameter("Set TESTPILOT_API_TOKEN to a random token of at least 32 characters")
+    if not durable and (identity or extension.s3_endpoint or extension.knowledge_endpoint or extension.require_approval):
+        raise typer.BadParameter("Identity/storage/approval/knowledge adapters require --durable")
     # Fail startup for mutable tags before accepting tasks.
     container_target(FORK_BASELINE_SHA, "healthy", runner_image)
     if config is not None:
@@ -60,9 +69,11 @@ def serve(
             return report
         # Use nanobot's own provider configuration path, no secret logging or duplicated model client.
         from nanobot.providers.factory import load_provider_snapshot
+        from nanobot.utils.llm_runtime import runtime_from_provider_snapshot
 
         snapshot = load_provider_snapshot(config)
-        report = await run_task(execution, snapshot.provider, snapshot.model, controls=controls)
+        report = await run_task(execution, snapshot.provider, snapshot.model, controls=controls,
+                                runtime=runtime_from_provider_snapshot(snapshot))
         report["evaluation_kind"] = "configured-model-real-container-pytest"
         return report
 
@@ -73,9 +84,13 @@ def serve(
         dsn = os.environ.get("TESTPILOT_DATABASE_URL", "")
         if not dsn:
             raise typer.BadParameter("Set TESTPILOT_DATABASE_URL for the durable profile")
-        service = create_durable_app(tokens={token: Principal("local-reviewer")}, root=output,
-                                     ledger=Ledger(dsn), image=runner_image, run=run, lease_seconds=lease_seconds, poll_delay=job_poll_seconds,
+        ledger = Ledger(dsn)
+        service = create_durable_app(tokens={} if identity else {token: Principal("local-reviewer")}, root=output,
+                                     ledger=ledger, image=runner_image, run=run, lease_seconds=lease_seconds, poll_delay=job_poll_seconds,
                                      workers=workers, start_scheduler=scheduler,
+                                     artifacts=artifact_factory(extension), identity=identity,
+                                     require_approval=extension.require_approval, model_limit=extension.model_limit,
+                                     knowledge=knowledge_client(extension, ledger.tenant_id),
                                      target=lambda mode: container_target(FORK_BASELINE_SHA, mode, runner_image))
     else:
         service = create_app(tokens={token: Principal("local-reviewer")}, root=output,
@@ -103,12 +118,16 @@ def scheduler_service(
     runner_image: str = typer.Option(...), output: Path = typer.Option(Path(".local/testpilot-api")),
     lease_seconds: int = typer.Option(30, min=1, max=300),
     job_poll_seconds: float = typer.Option(5, min=0.01, max=30),
+    settings: Path | None = typer.Option(None, help="Same testpilot artifact settings as the API Worker"),
 ) -> None:
     """Run the external Job scheduler separately; no model credentials or calls."""
     import asyncio
     import signal
 
+    from nanobot.config.loader import load_config
+    from nanobot.config.schema import TestPilotConfig
     from testpilot.scheduler import JobScheduler
+    from testpilot.settings import artifact_factory
     from testpilot.storage.postgres import Ledger
 
     dsn = os.environ.get("TESTPILOT_DATABASE_URL", "")
@@ -117,7 +136,8 @@ def scheduler_service(
     container_target(FORK_BASELINE_SHA, "healthy", runner_image)
 
     async def run() -> None:
-        service = JobScheduler(Ledger(dsn), output, runner_image, lease_seconds, job_poll_seconds)
+        extension = load_config(settings).testpilot if settings else TestPilotConfig()
+        service = JobScheduler(Ledger(dsn), output, runner_image, lease_seconds, job_poll_seconds, artifact_factory(extension))
         stopped = asyncio.Event()
         loop = asyncio.get_running_loop()
         if os.name != "nt":

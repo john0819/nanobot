@@ -1,15 +1,20 @@
 """The only module coupled to nanobot Runner and Tool contracts."""
 
+import asyncio
 import json
+import re
 from typing import Any
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, ProviderConversationState
+from nanobot.utils.helpers import estimate_prompt_tokens_chain
 from nanobot.utils.llm_runtime import LLMRuntime
+from testpilot.analysis_tools import ArtifactTool, CaseTool, KnowledgeTool, PlanTool
 from testpilot.artifacts import digest
+from testpilot.context import ContextBudgetError, input_budget
 from testpilot.domain import PendingExecution, ReportCandidate
 from testpilot.evidence import build_report, check_execution
 from testpilot.executor_contract import FixtureExecutor
@@ -21,6 +26,22 @@ async def retain_raw_history(
     _messages: list[dict[str, Any]], _previous_summary: str | None,
 ) -> None:
     """Short fixed fragment uses upstream's raw fallback, never a fabricated summary."""
+
+
+def private_checkpoint(body: dict[str, Any]) -> dict[str, Any]:
+    """Adapt the upstream opaque state using its owning serialization contract."""
+    state = body.get("provider_state")
+    if state is not None and not isinstance(state, ProviderConversationState):
+        raise ValueError("Unexpected provider checkpoint state")
+    return {**body, "provider_state": state.to_private_record() if state is not None else None}
+
+
+def candidate_text(content: str | None) -> str | None:
+    """Remove only a whole-message JSON code fence; never repair claims or extract substrings."""
+    if content is None or len(content) > 65536:
+        return None
+    match = re.fullmatch(r"\s*```json\s*\n(.*)\n```\s*", content, flags=re.DOTALL)
+    return match[1] if match else content
 
 
 class FixtureTool(Tool):
@@ -48,7 +69,7 @@ class FixtureTool(Tool):
         if isinstance(record, PendingExecution):
             self.pending = record
             return record.model_dump_json()
-        check = check_execution(record, self.executor.store, self.executor.task_id, self.executor.target)
+        check = await asyncio.to_thread(check_execution, record, self.executor.store, self.executor.task_id, self.executor.target)
         return json.dumps({
             "execution": record.model_dump(mode="json"),
             "counts": check.parsed.counts.model_dump() if check.parsed else None,
@@ -59,16 +80,31 @@ class FixtureTool(Tool):
 
 async def run_task(
     executor: FixtureExecutor, provider: LLMProvider, model: str,
-    *, controls: RunControls | None = None,
+    *, controls: RunControls | None = None, runtime: LLMRuntime | None = None,
 ) -> dict[str, object]:
     """One bounded fragment. Raw model final content never crosses publication boundary."""
     tools = ToolRegistry()
     fixture = FixtureTool(executor)
     tools.register(fixture)
+    if controls and controls.enable_planning:
+        tools.register(PlanTool(controls))
+        tools.register(ArtifactTool(executor, controls))
+        tools.register(CaseTool(executor))
+    if controls and controls.knowledge:
+        tools.register(KnowledgeTool(controls))
     progress_state = ProgressState()
+    captured = runtime or LLMRuntime.capture(provider, model, context_window_tokens=32768)
+    budget = input_budget(captured.context_window_tokens, captured.generation.max_tokens)
+
+    async def checkpoint(body: dict[str, Any]) -> None:
+        if controls is not None:
+            await controls.checkpoint(private_checkpoint(body))
 
     class DurableGuard(AgentHook):
         async def before_iteration(self, context: AgentHookContext) -> None:
+            estimated, _ = estimate_prompt_tokens_chain(provider, model, context.messages, tools.get_definitions())
+            if estimated > budget:
+                raise ContextBudgetError("Full messages/tools exceed task input budget; protected protocol is not truncated")
             if controls is not None:
                 await controls.before_model()
 
@@ -98,19 +134,19 @@ async def run_task(
                 "target, evidence id and actual counts. Never claim all passed when failed/skipped/missing.\n"
                 + json.dumps(ReportCandidate.model_json_schema())
             )},
-            {"role": "user", "content": f"Validate gateway fixture for task {executor.task_id}."},
+            {"role": "user", "content": controls.task_context if controls and controls.task_context else f"Validate gateway fixture for task {executor.task_id}."},
         ], tools=tools,
-        runtime=LLMRuntime.capture(provider, model, context_window_tokens=32768),
+        runtime=captured,
         max_iterations=controls.max_iterations if controls else 4, max_tool_result_chars=16000,
         session_key=f"testpilot:{executor.task_id}", concurrent_tools=False,
         finalize_on_max_iterations=False,
         consolidate_history=retain_raw_history,
-        checkpoint_callback=controls.checkpoint if controls else None,
+        checkpoint_callback=checkpoint if controls else None,
         hook=DurableGuard(reraise=True),
     ))
-    report = build_report(
+    report = await asyncio.to_thread(build_report,
         task_id=executor.task_id, target=executor.target, record=executor.record,
-        store=executor.store, candidate_json=result.final_content,
+        store=executor.store, candidate_json=candidate_text(result.final_content),
         runner_stop_reason=result.stop_reason,
     )
     report["model_rounds"] = len(result.round_usages)

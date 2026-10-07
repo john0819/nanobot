@@ -20,11 +20,22 @@ class ScriptedProvider(LLMProvider):
         reasoning_effort: str | None = None, tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         tool_messages = [m for m in messages if m.get("role") == "tool"]
-        if not tool_messages:
+        available = {tool["function"]["name"] for tool in tools or []}
+        used = {message.get("name") for message in tool_messages}
+        if "propose_plan" in available and "propose_plan" not in used:
+            steps = [{"id": "test", "action": "run_gateway_fixture", "rationale": "Use fixed independently reviewed assertions"},
+                     {"id": "report", "action": "publish_report", "rationale": "Only parser-backed execution claims"}]
+            if "search_knowledge" in available:
+                steps.insert(0, {"id": "knowledge", "action": "search_knowledge", "rationale": "Retrieve current versioned gateway contract"})
+            return LLMResponse(content=None, tool_calls=[ToolCallRequest(id="plan", name="propose_plan", arguments={"steps": steps, "limitations": ["Fixed fixture validation only"]})])
+        if "search_knowledge" in available and "search_knowledge" not in used:
+            return LLMResponse(content=None, tool_calls=[ToolCallRequest(id="knowledge", name="search_knowledge", arguments={"query": "NovaX 网关 写请求 重试 路由 超时"})])
+        executed = [message for message in tool_messages if message.get("name") == "run_gateway_fixture"]
+        if not executed:
             return LLMResponse(content=None, tool_calls=[ToolCallRequest(
                 id="fixture_call", name="run_gateway_fixture", arguments={},
             )])
-        observation = json.loads(tool_messages[-1]["content"])
+        observation = json.loads(executed[-1]["content"])
         execution = observation["execution"]
         counts = observation["counts"]
         candidate = {

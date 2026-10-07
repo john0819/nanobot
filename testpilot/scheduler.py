@@ -4,19 +4,21 @@ import asyncio
 from pathlib import Path
 from uuid import uuid4
 
-from testpilot.artifacts import ArtifactStore
 from testpilot.domain import PendingExecution
 from testpilot.recoverable_runner import RetainedRunner, UnknownDispatchError
 from testpilot.storage.postgres import LeaseLostError, Ledger, TaskRow
+from testpilot.storage_contracts import ArtifactFactory, local_artifacts
 
 
 class JobScheduler:
     def __init__(self, ledger: Ledger, root: Path, image: str,
-                 lease_seconds: int = 30, poll_delay: float = 5) -> None:
+                 lease_seconds: int = 30, poll_delay: float = 5,
+                 artifacts: ArtifactFactory = local_artifacts) -> None:
         if not 0.01 <= poll_delay <= 30 or not 1 <= lease_seconds <= 300:
             raise ValueError("invalid scheduler configuration")
         self.ledger, self.root, self.image = ledger, root.resolve(), image
         self.lease_seconds, self.poll_delay = lease_seconds, poll_delay
+        self.artifacts = artifacts
         self.worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -31,6 +33,7 @@ class JobScheduler:
     async def _loop(self, owner: str) -> None:
         while True:
             try:
+                await self.ledger.expire_approvals()
                 task = await self.ledger.claim(owner, self.lease_seconds, kind="external")
                 if task is not None:
                     await self.reconcile(task)
@@ -67,7 +70,7 @@ class JobScheduler:
                 else:
                     await self.ledger.finish(task, error="JOB_HANDLE_MISSING")
                 return
-            store = ArtifactStore(self.root / self.ledger.tenant_id / task.id / "artifacts")
+            store = self.artifacts(self.root, self.ledger.tenant_id, task.id)
             backend = RetainedRunner(task, operation, store, self.image, self.root / "jobs" / self.ledger.tenant_id)
             polls, expired = await self.ledger.job_poll(task)
             if task.cancel_requested or expired:

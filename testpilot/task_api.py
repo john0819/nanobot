@@ -16,7 +16,7 @@ from typing import Literal
 from uuid import uuid4
 
 from aiohttp import web
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from testpilot.artifacts import ArtifactStore
 from testpilot.domain import Contract
@@ -31,12 +31,18 @@ ExecutorFactory = Callable[[ArtifactStore, str, FixtureMode], FixtureExecutor]
 
 class TaskRequest(Contract):
     mode: FixtureMode = "healthy"
+    goal: str = Field(default="Validate gateway fixture", min_length=1, max_length=1000)
+    require_approval: bool = False
+    require_knowledge: bool = False
 
 
 @dataclass(frozen=True)
 class Principal:
     user_id: str
     tenant_id: str = "novax-demo"
+    roles: tuple[str, ...] = ("executor",)
+    projects: tuple[str, ...] = ("gateway-fixture",)
+    groups: tuple[str, ...] = ("role:qa",)
 
 
 @dataclass
@@ -129,6 +135,8 @@ def create_app(
             raise web.HTTPUnprocessableEntity(text="Idempotency-Key required")
         try:
             spec = TaskRequest.model_validate_json(await request.read())
+            if spec.require_approval or spec.require_knowledge or spec.goal != "Validate gateway fixture":
+                raise web.HTTPUnprocessableEntity(text="Governed tasks require the PostgreSQL durable profile")
         except ValidationError:
             raise web.HTTPUnprocessableEntity(text="Invalid task contract") from None
         async with lock:
