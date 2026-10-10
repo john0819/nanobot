@@ -422,11 +422,7 @@
           "state": {
             "enum": [
               "QUEUED",
-              "WAITING_APPROVAL",
               "RUNNING",
-              "WAITING_EXTERNAL",
-              "RECONCILING",
-              "CANCELLING",
               "COMPLETED",
               "NEEDS_REVIEW",
               "CANCELLED"

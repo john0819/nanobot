@@ -172,6 +172,7 @@ include = [
     "scripts/testpilot_crash_smoke.py",
     "scripts/testpilot_async_smoke.py",
     "scripts/testpilot_governed_smoke.py",
+    "scripts/testpilot_controls_smoke.py",
     "testpilot-compose.yml",
     "nanobot/web/dist/",
     "hatch_build.py",

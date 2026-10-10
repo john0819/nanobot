@@ -29,3 +29,6 @@ class RunControls:
     knowledge: Callable[[str], Awaitable[KnowledgeResult]] | None = None
     artifact_allowed: Callable[[str], Awaitable[bool]] | None = None
     memory: Callable[[], Awaitable[list[dict[str, object]]]] | None = None
+    before_action: Callable[[], Awaitable[None]] | None = None
+    inputs: Callable[[], Awaitable[list[dict[str, object]]]] | None = None
+    mark_inputs: Callable[[list[str]], Awaitable[None]] | None = None

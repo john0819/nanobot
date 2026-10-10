@@ -58,6 +58,7 @@ async function details(path) {
     }
   } catch { /* Reviewers can read approval requests without owning execution history. */ }
   try { show("plan", await api(path + "/plan")); } catch { show("plan", null); }
+  try { show("inputs", await api(path + "/inputs")); } catch { show("inputs", null); }
   try { approval = await api(path + "/approval"); show("approval-detail", approval); } catch { approval = null; show("approval-detail", null); }
   el("artifacts").replaceChildren();
   try {
@@ -108,7 +109,8 @@ async function load() {
 }
 function clearIdentity() {
   stop(); identityEpoch++; bearer = ""; selected = ""; approval = null; snapshot = null;
-  ["snapshot", "plan", "report", "approval-detail"].forEach(id => show(id, null));
+  pendingInput = null; el("input-text").value = "";
+  ["snapshot", "plan", "report", "approval-detail", "inputs"].forEach(id => show(id, null));
   ["tasks", "events", "artifacts", "runs", "memories"].forEach(id => el(id).replaceChildren());
   ["task-id", "source-run", "source-case"].forEach(id => { el(id).value = ""; });
 }
@@ -120,6 +122,17 @@ action("create", async () => {
   el("task-id").value = task.task_id; await tasks(); await load();
 });
 action("cancel", async () => { const path = taskPath(); await api(path + "/cancel", { method: "POST" }); await details(path); });
+for (const operation of ["pause", "resume"]) action(operation, async () => {
+  const path = taskPath(); if (path !== selected || !snapshot) throw new Error("先查看当前任务状态");
+  await api(path + "/" + operation, { method: "POST", body: JSON.stringify({ expected_state_version: snapshot.state_version }) }); await load();
+});
+let pendingInput = null;
+action("input-send", async () => {
+  const path = taskPath(), text = el("input-text").value;
+  if (!pendingInput || pendingInput.path !== path || pendingInput.text !== text) pendingInput = { path, text, client_request_id: crypto.randomUUID() };
+  await api(path + "/inputs", { method: "POST", body: JSON.stringify({ client_request_id: pendingInput.client_request_id, text }) });
+  pendingInput = null; el("input-text").value = ""; await details(path);
+});
 action("rerun", async () => {
   const path = taskPath(); if (path !== selected || !snapshot) throw new Error("先查看当前任务");
   await api(path + "/rerun", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ expected_state_version: snapshot.state_version, reason: el("rerun-reason").value }) }); await load();

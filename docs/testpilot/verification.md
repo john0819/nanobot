@@ -1,5 +1,30 @@
 # TestPilot 验证记录
 
+## 第七批：暂停、恢复与私有补充输入
+
+日期：2026-10-10。交付版本化控制消息、PAUSED 外部对账、私有输入及控制台操作。
+
+| 检查 | 实际结果 |
+|---|---|
+| TestPilot 全集（真实 PG/Docker，无 skip） | **106 passed**，36.12 秒 |
+| 最近上游 Runner/QA 兼容集 | **66 passed**，0.47 秒 |
+| Ruff / strict BasedPyright / JS | 全通过 / 0 errors / node --check 通过 |
+| 追加 SQL | 006，001–005 原字节/校验和保留 |
+| 暂停中的模型调用 | 旧 lease 被 fencing；实际模型 coroutine 中断后无外部 Job |
+| 暂停中的已派发 Job | 独立 Scheduler/重启实例对账结果，保持 PAUSED，模型预算不增加 |
+| 恢复 | 原 Run、目标、已用轮次/deadline 保留；结果回放，同 Operation/Job 数量=1 |
+| 输入 | 并发同 ID 只接受一次；不同内容/主体/额外 scope 字段拒绝；上限和私有事件校验 |
+| 处理记录 | 实际输入进入恢复后的模型上下文；consumed_at、input.projected 持久化、不重复 |
+| 截止与授权 | 暂停不延长 deadline；取消可用；暂停审批仍过期；环境快照漂移恢复 409 |
+| 实际 CLI 两进程 | nanobot API 暂停/输入→API 重启→独立 Scheduler 对账→恢复同 Run→真实 3 PASS/1 FAIL |
+| Python wheel | 控制模块/006迁移/控制台资源均打包；使用既有 skip 上游 WebUI build 开关 |
+
+CLI smoke 结果：`.local/testpilot-controls-smoke/17629acc1a4c40a28115bad0f2ab2e28/summary.json`。
+使用免费 scripted Provider，总模型轮次 3，report_validated=true，external_job_count=1。
+本轮未新增付费模型调用，未运行 held-out 或性能评测。控制台已验证 JS 语法与服务端协议，未做浏览器交互自动化。
+PAUSED 不等于外部执行暂停；暂停记录不能重置总预算。尚未提供模型主动 request_input/WAITING_INPUT 或完整 transcript 恢复。
+运行与边界见 [任务控制 Runbook](task-controls-runbook.md) 和 [ADR 007](adr/007-task-control-fencing.md)。
+
 ## 第六批：复跑、历史报告、审核 Memory
 
 日期：2026-10-07。交付 Task 跨 Run 原预算复跑、不可变终态报告、Memory 审核与控制台入口。

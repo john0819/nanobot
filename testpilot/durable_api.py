@@ -31,6 +31,7 @@ from testpilot.storage.postgres import (
 )
 from testpilot.storage_contracts import ArtifactFactory, local_artifacts
 from testpilot.task_api import Principal, TaskRequest
+from testpilot.task_controls import StateControl, TaskInput
 
 
 def create_app(
@@ -154,6 +155,45 @@ def create_app(
         if task is None:
             raise web.HTTPNotFound(text="Task not found")
         return web.json_response(task.snapshot(), status=202 if task.state == "CANCELLING" else 200)
+
+    async def control(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        owner = await auth(request)
+        permission(owner, "executor")
+        resume = request.path.endswith("/resume")
+        if resume and task.target != target(task.mode):
+            raise web.HTTPConflict(text="Original target snapshot unavailable; automatic resume denied")
+        try:
+            spec = StateControl.model_validate_json(await request.read())
+            fresh = await ledger.control(task.id, owner.user_id, spec.expected_state_version, resume)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid task control contract") from None
+        except (RequestConflictError, BudgetExhaustedError):
+            raise web.HTTPConflict(text="Task state/version/budget conflict") from None
+        if not resume:
+            pool.interrupt(task.id)
+        return web.json_response(fresh.snapshot(), status=202)
+
+    async def input_message(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        if request.method == "GET":
+            rows = await ledger.inputs(task)
+            for row in rows:
+                row["created_at"] = row["created_at"].isoformat()
+                row["consumed_at"] = row["consumed_at"].isoformat() if row["consumed_at"] else None
+            return web.json_response({"inputs": rows})
+        permission(await auth(request), "executor")
+        try:
+            spec = TaskInput.model_validate_json(await request.read())
+            fresh, created = await ledger.add_input(task.id, task.actor_id, spec.client_request_id, spec.text)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid input contract") from None
+        except RequestConflictError:
+            raise web.HTTPConflict(text="Input payload/run/state conflict") from None
+        except CapacityReachedError:
+            raise web.HTTPTooManyRequests(text="Input capacity reached") from None
+        return web.json_response({"task_id": fresh.id, "run_id": fresh.run_id, "client_request_id": spec.client_request_id,
+                                  "created": created}, status=202 if created else 200)
 
     async def events(request: web.Request) -> web.Response:
         task = await get_task(request)
@@ -314,6 +354,10 @@ def create_app(
 
     app = web.Application(client_max_size=8192, middlewares=[database_errors])
     register_console(app)
+    app.router.add_post("/v1/tasks/{task_id}/pause", control)
+    app.router.add_post("/v1/tasks/{task_id}/resume", control)
+    app.router.add_post("/v1/tasks/{task_id}/inputs", input_message)
+    app.router.add_get("/v1/tasks/{task_id}/inputs", input_message)
     app.router.add_get("/v1/tasks/{task_id}/runs", runs)
     app.router.add_get("/v1/tasks/{task_id}/runs/{run_id}/report", historical_report)
     app.router.add_post("/v1/tasks/{task_id}/rerun", rerun)

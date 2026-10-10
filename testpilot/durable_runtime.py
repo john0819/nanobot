@@ -93,6 +93,12 @@ class WorkerPool:
         self.knowledge = knowledge
         self._tasks: list[asyncio.Task[None]] = []
         self.stopping = False
+        self._active: dict[str, asyncio.Task[None]] = {}
+
+    def interrupt(self, task_id: str) -> None:
+        task = self._active.get(task_id)
+        if task is not None:
+            task.cancel()  # DB fencing is authoritative; this only accelerates local pause.
 
     async def start(self) -> None:
         await self.ledger.ready()
@@ -123,6 +129,7 @@ class WorkerPool:
     async def _work(self, task: TaskRow) -> None:
         current = asyncio.current_task()
         assert current is not None
+        self._active[task.id] = current
         lost = False
         cancel = task.cancel_requested
         backend: RetainedRunner | None = None
@@ -195,6 +202,10 @@ class WorkerPool:
             async def artifact_allowed(content_hash: str) -> bool:
                 return content_hash in await self.ledger.knowledge_artifacts(task)
 
+            async def inputs() -> list[dict[str, object]]:
+                return [{"client_request_id": note["client_request_id"], "text": note["text"]}
+                        for note in await self.ledger.inputs(task)]
+
             async def memory() -> list[dict[str, object]]:
                 repository = MemoryRepository(self.ledger)
                 entries = await repository.retrieve(task)
@@ -223,6 +234,9 @@ class WorkerPool:
                 knowledge=search if self.knowledge else None,
                 artifact_allowed=artifact_allowed,
                 memory=memory,
+                before_action=lambda: self.ledger.guard_action(task),
+                inputs=inputs,
+                mark_inputs=lambda ids: self.ledger.consume_inputs(task, ids),
             )
             report = await asyncio.wait_for(self.run(executor, controls), remaining)
             fresh = await self.ledger.heartbeat(task, self.lease_seconds)
@@ -278,5 +292,6 @@ class WorkerPool:
             except Exception:
                 pass
         finally:
+            self._active.pop(task.id, None)
             timer.cancel()
             await asyncio.gather(timer, return_exceptions=True)

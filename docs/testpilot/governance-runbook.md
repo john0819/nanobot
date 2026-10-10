@@ -1,6 +1,7 @@
 # 身份、审批、对象存储、Plan 与知识库
 
 复跑、历史报告和审核 Memory 的新增命令见 [历史与经验 Runbook](history-memory-runbook.md)。
+暂停、恢复、私有补充说明见 [任务控制 Runbook](task-controls-runbook.md)。
 
 本增量通过 `nanobot testpilot serve --durable` 运行，沿用 PG 事实源和独立 Job Scheduler。
 配置的 `testpilot` 节点见 [示例](enterprise-settings.example.json)，可用 `--settings` 单独传入，

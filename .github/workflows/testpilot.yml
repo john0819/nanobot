@@ -37,7 +37,7 @@ jobs:
         run: python -m pip install -e '.[dev]'
       - name: Focused lint and strict type check
         run: |
-          ruff check testpilot runner tests/testpilot scripts/testpilot_live_smoke.py scripts/testpilot_crash_smoke.py scripts/testpilot_async_smoke.py
+          ruff check testpilot runner tests/testpilot scripts/testpilot_live_smoke.py scripts/testpilot_crash_smoke.py scripts/testpilot_async_smoke.py scripts/testpilot_controls_smoke.py
           basedpyright testpilot
       - name: Build fixed isolated Runner
         run: |
@@ -55,6 +55,7 @@ jobs:
           python scripts/testpilot_live_smoke.py
           python scripts/testpilot_crash_smoke.py
           python scripts/testpilot_async_smoke.py
+          python scripts/testpilot_controls_smoke.py
           python -m testpilot --mode healthy
           python -m testpilot --mode retry-write-bug
           if python -m testpilot --mode retry-write-bug --claim-all-passed; then
@@ -73,5 +74,6 @@ jobs:
             .local/testpilot-live-smoke/
             .local/testpilot-crash-smoke/
             .local/testpilot-async-smoke/
+            .local/testpilot-controls-smoke/
           include-hidden-files: true
           retention-days: 7

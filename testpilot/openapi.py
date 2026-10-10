@@ -5,6 +5,7 @@ def document(durable: bool = False) -> dict[str, object]:
     from testpilot.governance import ApprovalDecision
     from testpilot.history import MemoryCandidateRequest, MemoryDecision, RerunRequest
     from testpilot.task_api import TaskRequest
+    from testpilot.task_controls import StateControl, TaskInput
 
     json_task: dict[str, object] = {"application/json": {"schema": {"$ref": "#/components/schemas/TaskSnapshot"}}}
     error = {"description": "Request rejected", "content": {"text/plain": {"schema": {"type": "string"}}}}
@@ -14,12 +15,16 @@ def document(durable: bool = False) -> dict[str, object]:
         return {"description": description, "content": content}
 
     return {
-        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.6.0" if durable else "0.2.0",
+        "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.7.0" if durable else "0.2.0",
                                      "description": "PG asynchronous Job scheduler, persistent progress guard and authenticated SSE replay." if durable else "Loopback development only. In-memory task state; no durable recovery."},
         "servers": [{"url": "http://127.0.0.1:8920"}],
         "security": [{"LocalBearer": []}],
         "paths": {
             **({
+                **{f"/v1/tasks/{{task_id}}/{action}": {"post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StateControl"}}}},
+                   "responses": {"202": response("Pause fences Agent leases; resume preserves Run/budget and first reconciles external facts"), "401": error, "403": error, "404": error, "409": error, "422": error}}} for action in ("pause", "resume")},
+                "/v1/tasks/{task_id}/inputs": {"get": {"parameters": [task_id], "responses": {"200": response("Owner-scoped notes and projection receipts"), "401": error, "404": error}},
+                    "post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TaskInput"}}}}, "responses": {"202": response("Private input accepted"), "200": response("Same input replay"), "401": error, "403": error, "404": error, "409": error, "422": error, "429": error}}},
                 "/v1/tasks/{task_id}/rerun": {"post": {"parameters": [task_id, {"name": "Idempotency-Key", "in": "header", "required": True, "schema": {"type": "string"}}],
                     "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RerunRequest"}}}},
                     "responses": {"202": response("New revalidation Run, original task budget and prior reports retained"), "200": response("Idempotent replay; requested_run_id identifies the created Run"), "401": error, "403": error, "404": error, "409": error, "422": error, "429": error}}},
@@ -84,6 +89,7 @@ def document(durable: bool = False) -> dict[str, object]:
                 "TaskRequest": TaskRequest.model_json_schema(),
                 **({"ApprovalDecision": ApprovalDecision.model_json_schema()} if durable else {}),
                 **({"RerunRequest": RerunRequest.model_json_schema(), "MemoryCandidateRequest": MemoryCandidateRequest.model_json_schema(), "MemoryDecision": MemoryDecision.model_json_schema()} if durable else {}),
+                **({"StateControl": StateControl.model_json_schema(), "TaskInput": TaskInput.model_json_schema()} if durable else {}),
                 "TaskSnapshot": {"type": "object", "required": ["task_id", "state", "mode", "created_at", "error", "report_ready", "operation_id"] + (["run_id", "lease_epoch", "model_rounds"] if durable else []),
                                  "properties": {
                                      **({"run_id": {"type": "string"}, "lease_epoch": {"type": "integer", "minimum": 0},
@@ -91,7 +97,7 @@ def document(durable: bool = False) -> dict[str, object]:
                                          "model_rounds": {"type": "integer", "minimum": 0, "maximum": 40},
                                          "waiting_reason": {"type": ["string", "null"]}, "next_wakeup_at": {"type": ["string", "null"], "format": "date-time"}} if durable else {}),
                                      "task_id": {"type": "string"},
-                                     "state": {"enum": ["QUEUED", "WAITING_APPROVAL", "RUNNING", "WAITING_EXTERNAL", "RECONCILING", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"]},
+                                     "state": {"enum": (["QUEUED", "WAITING_APPROVAL", "RUNNING", "WAITING_EXTERNAL", "RECONCILING", "PAUSED", "CANCELLING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"] if durable else ["QUEUED", "RUNNING", "COMPLETED", "NEEDS_REVIEW", "CANCELLED"])},
                                      "mode": {"enum": ["healthy", "retry-write-bug"]},
                                      "created_at": {"type": "string", "format": "date-time"},
                                      "error": {"type": ["string", "null"]}, "report_ready": {"type": "boolean"},

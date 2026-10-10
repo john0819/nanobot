@@ -11,6 +11,7 @@
 <label><input id="approval" type="checkbox" checked>要求独立审批</label><label><input id="knowledge" type="checkbox">要求知识库证据</label><button id="create">创建任务</button></section>
 <section><h2>任务列表</h2><button id="refresh">我的任务</button><button id="review">待审批任务</button><div id="tasks"></div></section>
 <section><h2>任务详情</h2><label>任务 ID <input id="task-id"></label><button id="load">查看任务</button><button id="cancel">取消任务</button>
+<button id="pause">暂停 Agent</button><button id="resume">恢复原 Run</button><h3>补充信息</h3><label>说明 <textarea id="input-text" maxlength="2000" placeholder="补充待分析信息；不能修改目标、权限或测试断言"></textarea></label><button id="input-send">提交补充信息</button><pre id="inputs"></pre>
 <p id="stream-status" role="status"></p><pre id="snapshot"></pre><h3>计划</h3><pre id="plan"></pre>
 <h3>执行历史与复跑</h3><p>复跑创建新 Run，保留旧报告并使用原任务剩余预算；未决执行必须先对账。</p><label>复跑原因 <input id="rerun-reason" maxlength="500" value="Verify repeatability of the observed result"></label><button id="rerun">申请复跑</button><div id="runs"></div>
 <h3>审批内容</h3><p>审核目标、执行镜像和请求摘要后提交。相同申请人不能批准自己的任务。</p><pre id="approval-detail"></pre><button id="approve">批准</button><button id="deny">拒绝</button>

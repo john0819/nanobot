@@ -32,10 +32,15 @@ class JobScheduler:
             await asyncio.gather(self.worker, return_exceptions=True)
 
     async def _loop(self, owner: str) -> None:
+        next_sweep = 0.0
         while True:
             try:
-                await self.ledger.expire_approvals()
-                await MemoryRepository(self.ledger).expire()
+                now = asyncio.get_running_loop().time()
+                if now >= next_sweep:
+                    await self.ledger.expire_approvals()
+                    await MemoryRepository(self.ledger).expire()
+                    await self.ledger.expire_paused()
+                    next_sweep = now+1
                 task = await self.ledger.claim(owner, self.lease_seconds, kind="external")
                 if task is not None:
                     await self.reconcile(task)

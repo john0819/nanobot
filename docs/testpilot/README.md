@@ -104,6 +104,7 @@ PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable`
 - [x] 最小控制台：创建/任务列表/审批/Plan/SSE/报告/证据/取消。
 - [x] 显式新 Run 复跑：原预算、新审批、未决操作拒绝、不可变旧报告和历史证据下载。
 - [x] 失败观察 Memory：候选/独立审核、个人与项目 scope、代码/环境匹配、TTL/撤销/版本审计与实际读取。
+- [x] 暂停/恢复/私有输入：版本 CAS、旧 Worker fencing、既有 Job 继续对账、输入去重与上下文投影。
 - [ ] M2 完整验收：完整 F01–F05/F11–F13、GC 与版本化完整上下文恢复。
 - [ ] M3 完整验收：完整权限/取消故障矩阵、同 Run 多 suite 复跑、预算 amendment 和完整 Evidence 类型。
 - [ ] M4：task 级预算、Plan/Progress Guard/上下文、受治理的按需 RAG、真实模型评测。
