@@ -19,7 +19,7 @@ def document(durable: bool = False) -> dict[str, object]:
     if durable:
         from testpilot.defects import DraftDecision, DraftRequest
         defect_schemas = {"DraftRequest": DraftRequest.model_json_schema(), "DraftDecision": DraftDecision.model_json_schema()}
-        object_response = {"application/json": {"schema": {"type": "object"}}}
+        object_response: dict[str, object] = {"application/json": {"schema": {"type": "object"}}}
         defect_paths = {
             "/v1/tasks/{task_id}/defects": {"post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DraftRequest"}}}}, "responses": {"201": response("Immutable draft derived from validated failure; no external submission", object_response), "401": error, "403": error, "404": error, "409": error, "422": error}}},
             "/v1/defects": {"get": {"parameters": [{"name": "review", "in": "query", "schema": {"type": "boolean"}}], "responses": {"200": response("Owner drafts or reviewer-authorized project queue", object_response), "401": error, "403": error}}},
