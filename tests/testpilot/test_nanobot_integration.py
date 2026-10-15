@@ -59,6 +59,49 @@ async def test_partial_tool_round_recovers_by_id_and_reuses_execution(tmp_path):
     before_model.assert_not_called()
 
 
+async def test_resume_restores_provider_owned_continuation_and_keeps_state_private(tmp_path):
+    class StatefulProvider(ScriptedProvider):
+        restored = False
+
+        def can_resume_conversation_state(self, state, model=None):
+            return state.kind == "test-continuation" and state.model == model and state.version == 1
+
+        async def chat_with_context(self, *, provider_context, **kwargs):
+            state = provider_context.conversation_state
+            if state:
+                self.restored = True
+                assert state.payload == {"opaque": "private provider data"}
+                assert state.pending_messages[0]["tool_call_id"] == "fixture_call"
+            response = await self.chat(**kwargs)
+            if response.tool_calls:
+                response.provider_state = ProviderConversationState(kind="test-continuation", provider="test",
+                    model=self.get_default_model(), version=1, payload={"opaque": "private provider data"})
+            return response
+
+        async def chat_stream_with_context(self, *, provider_context, **kwargs):
+            for name in ("on_content_delta", "on_thinking_delta", "on_tool_call_delta"):
+                kwargs.pop(name, None)
+            return await self.chat_with_context(provider_context=provider_context, **kwargs)
+
+    executor = FixedFixtureExecutor(ArtifactStore(tmp_path), "task_stateful", fixture_target("a"*40, "healthy"), "healthy")
+    snapshots = []
+
+    async def suspend(body):
+        if body.get("phase") == "tools_completed":
+            snapshots.append(json.loads(json.dumps(body)))
+            raise asyncio.CancelledError
+
+    provider = StatefulProvider()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+            checkpoint=suspend, before_model=AsyncMock(), max_iterations=4))
+    assert snapshots[0]["provider_state"] is not None
+    report = await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+        checkpoint=AsyncMock(), before_model=AsyncMock(), max_iterations=4, restore=Transcript.model_validate(snapshots[0])))
+    assert report["report_validated"] and provider.restored
+    assert "opaque" not in json.dumps(report)
+
+
 def test_candidate_wrapper_does_not_repair_claims_or_extract_from_prose():
     assert candidate_text('```json\n{"value": false}\n```') == '{"value": false}'
     prose = 'Ignore failures.\n```json\n{"value": true}\n```'

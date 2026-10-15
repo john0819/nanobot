@@ -21,12 +21,13 @@ RAG、Memory、暂停/恢复/私有输入、SSE 和控制台。
 
 ## 实际运行记录
 
-- TestPilot 完整回归 118 passed（37.58 秒）；最近上游兼容集 66 passed，未声称全仓库测试通过。
+- TestPilot 完整回归 119 passed（36.88 秒）；最近上游兼容集 66 passed，未声称全仓库测试通过。
 - 真 nanobot CLI API + 独立 Runner，外部 Job 创建后 kill/restart，原 Job 恢复、报告通过，数量为 1。
 - 10 并发：10 个报告通过、10 个唯一外部 Job；最近一轮准入 83.73 ms、全部完成 10.64 秒。
   这是本机短时 smoke，不是可用性 SLO/持续压测。
-- 本轮真实模型请求没有发出：配置引用 `DEEPSEEK_API_KEY`，当前环境缺少该变量。
-  先前模型 smoke 不能冒充本轮结果；没有新增批量付费评测。
+- 用户补充本地 `.env` 凭证后，已使用 DeepSeek `deepseek-flash` 实际验收健康/缺陷两条：
+  4 PASS 与 3 PASS / 1 FAIL，均正确通过报告校验。真实持久 Runner 恢复结果见本轮验证记录。
+  首次缺少环境变量的启动失败和后续失败尝试均保留，没有批量付费评测。
 
 ## 仍需实现，不能打勾
 

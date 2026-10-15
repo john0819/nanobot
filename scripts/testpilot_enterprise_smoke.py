@@ -1,5 +1,6 @@
 """Actual nanobot CLI processes: Git commit -> remote Runner -> fenced report -> inventory."""
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -22,6 +23,12 @@ def port() -> int:
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, help="Use a configured real model for one smoke task")
+    parser.add_argument("--load10", action="store_true", help="Ten additional deterministic tasks, no paid model")
+    args = parser.parse_args()
+    if args.config and args.load10:
+        parser.error("Paid model smoke and deterministic load test must run separately")
     os.environ["TESTPILOT_DATABASE_URL"]
     image = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", "testpilot-runner:dev"], text=True).strip()
     root = (Path(".local/testpilot-enterprise-smoke")/("session_"+uuid4().hex)).resolve()
@@ -60,8 +67,11 @@ async def main() -> None:
 
     try:
         runner_process = start(runner_command, "runner.log")
-        api_process = start(prefix+["serve", "--durable", *common, "--port", str(api_port),
-            "--output", str(root/"api"), "--job-poll-seconds", "0.1"], "api.log")
+        api_command = prefix+["serve", "--durable", *common, "--port", str(api_port),
+            "--output", str(root/"api"), "--job-poll-seconds", "0.1"]
+        if args.config:
+            api_command.extend(["--config", str(args.config.resolve())])
+        api_process = start(api_command, "api.log")
         async with ClientSession(headers={"Authorization": "Bearer "+api_token}) as client:
             for _ in range(150):
                 if api_process.poll() is not None or runner_process.poll() is not None:
@@ -108,8 +118,9 @@ async def main() -> None:
             assert inventory["integrity_ok"] and len(inventory["verified"]) >= 3
             result = {"task_id": task_id, "report_validated": True, "commit_sha": commit,
                 "runner_process_restart": True, "job_count": 1, "trace_count": len(trace["traces"]),
-                "artifacts_verified": len(inventory["verified"]), "evaluation_kind": "scripted-provider-real-git-remote-runner"}
-            if "--load10" in sys.argv:
+                "artifacts_verified": len(inventory["verified"]),
+                "evaluation_kind": "configured-model-real-git-remote-runner" if args.config else "scripted-provider-real-git-remote-runner"}
+            if args.load10:
                 started = time.monotonic()
 
                 async def create_load_task() -> str:

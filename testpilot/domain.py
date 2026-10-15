@@ -63,7 +63,7 @@ class Claim(Contract):
     claim_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
     type: Literal["TEST_EXECUTED", "TEST_COUNTS", "ALL_PASSED", "CASE_FAILED"]
     evidence_ids: tuple[str, ...]
-    value: bool | Counts | str
+    value: bool | Counts | str = Field(description="TEST_EXECUTED and ALL_PASSED require JSON boolean; TEST_COUNTS requires Counts object; CASE_FAILED requires exact case ID string. Never use narrative text for TEST_EXECUTED.")
 
 
 class PendingExecution(Contract):

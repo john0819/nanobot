@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-15",
+  "endpoint": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "evaluation_kind": "real-model-smoke-not-batch-evaluation",
+  "task_attempts": 6,
+  "accepted_reports": 4,
+  "rejected_reports_during_diagnosis": 2,
+  "fixture_results": [
+    {
+      "mode": "healthy",
+      "task_id": "task_370deff862f145b98785711a4f7f18f7",
+      "report_validated": true,
+      "quality_verdict": "PASS",
+      "counts": {
+        "planned": 4,
+        "passed": 4,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "not_run": 0,
+        "executed": 4,
+        "pass_rate": 1.0
+      },
+      "model_rounds": 2,
+      "operation_id": "op_d2fe88decaac4e3495e168d933e12e4e"
+    },
+    {
+      "mode": "retry-write-bug",
+      "task_id": "task_329ceaa79b644c11a2ec780977506e66",
+      "report_validated": true,
+      "quality_verdict": "FAIL",
+      "counts": {
+        "planned": 4,
+        "passed": 3,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 0,
+        "not_run": 0,
+        "executed": 4,
+        "pass_rate": 0.75
+      },
+      "model_rounds": 2,
+      "operation_id": "op_0a5edc4dd0c04fe88a2d098796638fc4"
+    }
+  ],
+  "final_git_runner_result": {
+    "task_id": "task_ea4a4a440d474f37ae3b214378018365",
+    "report_validated": true,
+    "commit_sha": "c4b1e984306ba4ef231a59f84c86a71c9b9e7ffa",
+    "runner_process_restart": true,
+    "job_count": 1,
+    "trace_count": 4,
+    "artifacts_verified": 7,
+    "evaluation_kind": "configured-model-real-git-remote-runner"
+  },
+  "failure_record": [
+    {
+      "task_id": "task_b55808bd11af436ca2be6e56232115c0",
+      "validation_gaps": [
+        "AGENT_NOT_COMPLETED",
+        "INVALID_REPORT_CANDIDATE"
+      ],
+      "note": "Original provider error was not retained; private terminal diagnostics added."
+    },
+    {
+      "task_id": "task_cc78f58e3b964633a51f06cd7f13fedf",
+      "validation_gaps": [
+        "UNSUPPORTED_CLAIM:c1"
+      ],
+      "note": "TEST_EXECUTED value was narrative text, not boolean; schema/prompt clarified. Gate stayed strict."
+    }
+  ]
+}

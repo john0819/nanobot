@@ -14,6 +14,8 @@
 .venv/bin/python scripts/testpilot_enterprise_smoke.py
 # 追加 10 并发真实任务验收；4 个持久 Runner 槽位，无付费模型
 .venv/bin/python scripts/testpilot_enterprise_smoke.py --load10
+# 已在进程环境加载 DEEPSEEK_API_KEY 后，单条真实模型 smoke：
+.venv/bin/python scripts/testpilot_enterprise_smoke.py --config .local/config.json
 ```
 
 脚本在 `.local/testpilot-enterprise-smoke/session_*/result.json` 留下无密钥结果，
@@ -87,7 +89,9 @@ Docker Job 创建前的不可判定崩溃不能凭空恢复成成功；保留 UN
 
 Checkpoint v2 保存完整 message/tool_call/result、Runtime 指纹与私有 provider state。
 恢复按 tool_call_id 补齐 read-only/显式幂等动作；其他未决写拒绝自动重放。
-当前通过完整消息协议重建模型输入，不回放 provider opaque continuation。
+兼容的 provider state 经其拥有的反序列化/兼容性检查后恢复，pending 工具结果与最新执行事实同步。
+不兼容的 continuation 拒绝恢复；opaque continuation 需要压缩时保守停止，不能直接删原文假装同步了私有状态。
+无 provider state 的协议通过完整消息重建输入。
 超过预算只移除完整低优先级工具轮，保留负面/部分证据和用户输入；保护事实超预算则停止。
 原始 checkpoint 始终是私有不可变内容寻址产物，不进入公共报告/下载接口。
 
