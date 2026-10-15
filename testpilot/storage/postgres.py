@@ -19,6 +19,7 @@ from testpilot.execution import FixtureMode
 from testpilot.governance import ApprovalDeniedError, TaskPlan, execution_hash
 from testpilot.knowledge import KnowledgeEvidence, KnowledgeResult
 from testpilot.progress import ProgressStalledError, ProgressState, advance
+from testpilot.task_controls import InputRequest
 from testpilot.telemetry import TraceRecord
 
 PROJECT = "gateway-fixture"
@@ -68,13 +69,15 @@ class TaskRow(Contract):
     activated_at: datetime | None
     model_limit: int
     paused_from: str | None
+    input_request: dict[str, object] | None = None
 
     def snapshot(self, operation_id: str | None = None) -> dict[str, object]:
         return {"task_id": self.id, "run_id": self.run_id, "state": self.state, "mode": self.mode,
                 "created_at": self.created_at.isoformat(), "report_ready": self.report is not None,
                 "error": self.error, "operation_id": operation_id, "lease_epoch": self.lease_epoch,
                 "model_rounds": self.model_rounds, "model_limit": self.model_limit, "next_wakeup_at": self.next_wakeup_at.isoformat() if self.next_wakeup_at else None,
-                "waiting_reason": "EXTERNAL_JOB" if self.state in {"WAITING_EXTERNAL", "RECONCILING"} else "APPROVAL" if self.state == "WAITING_APPROVAL" else "USER_PAUSE" if self.state == "PAUSED" else None,
+                "waiting_reason": "EXTERNAL_JOB" if self.state in {"WAITING_EXTERNAL", "RECONCILING"} else "APPROVAL" if self.state == "WAITING_APPROVAL" else "INPUT_REQUIRED" if self.state == "PAUSED" and self.input_request else "USER_PAUSE" if self.state == "PAUSED" else None,
+                "input_request": self.input_request,
                 "goal": self.goal, "approval_required": self.approval_required, "knowledge_required": self.knowledge_required,
                 "state_version": self.state_version, "paused_from": self.paused_from}
 
@@ -162,12 +165,14 @@ class Ledger:
 
     async def admit(self, actor: str, key: str, mode: FixtureMode, target: Target,
                     max_active: int = 10, *, goal: str = "Validate gateway fixture",
-                    approval_required: bool = False, knowledge_required: bool = False, model_limit: int = 4) -> tuple[TaskRow, bool]:
+                    approval_required: bool = False, knowledge_required: bool = False, model_limit: int = 4,
+                    max_user_active: int = 10, max_global_active: int = 1000) -> tuple[TaskRow, bool]:
         if target.tenant_id != self.tenant_id or target.project_id != PROJECT:
             raise ValueError("target scope mismatch")
         payload_hash = hashlib.sha256(json.dumps([mode, goal, approval_required, knowledge_required]).encode()).hexdigest()
         async with self.connection() as connection:
             # Serialize admission in this tenant/project; quotas and dedup share one transaction.
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('testpilot:global-admission',0))")
             await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (self.tenant_id + ":" + PROJECT,))
             cursor = await connection.execute("SELECT mode,task_id,payload_hash FROM testpilot.request_dedup WHERE tenant_id=%s AND project_id=%s AND actor_id=%s AND request_key=%s", (self.tenant_id, PROJECT, actor, key))
             previous = await cursor.fetchone()
@@ -179,10 +184,7 @@ class Ledger:
                 if (task.goal, task.approval_required, task.knowledge_required) != (goal, approval_required, knowledge_required):
                     raise RequestConflictError("key bound to another scope")
                 return task, False
-            cursor = await connection.execute("SELECT count(*) AS count FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND state IN ('QUEUED','WAITING_APPROVAL','RUNNING','WAITING_EXTERNAL','RECONCILING','PAUSED','CANCELLING')", (self.tenant_id, PROJECT))
-            count = await cursor.fetchone()
-            if count is None or count["count"] >= max_active:
-                raise CapacityReachedError("queue capacity reached")
+            await self._capacity(connection, actor, max_active, max_user_active, max_global_active)
             task_id, run_id = "task_" + uuid4().hex, "run_" + uuid4().hex
             cursor = await connection.execute(
                 "INSERT INTO testpilot.tasks (tenant_id,project_id,id,actor_id,mode,run_id,target,goal,approval_required,knowledge_required,state,activated_at,model_limit) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s THEN NULL ELSE clock_timestamp() END,%s) RETURNING *",
@@ -303,10 +305,14 @@ class Ledger:
                     await self._deadline(connection, task)
                 if task.model_rounds >= task.model_limit:
                     raise BudgetExhaustedError("resume cannot enlarge task budget")
+                if task.input_request:
+                    cursor = await connection.execute("SELECT 1 FROM testpilot.task_inputs WHERE tenant_id=%s AND project_id=%s AND run_id=%s AND consumed_at IS NULL AND created_at>=%s LIMIT 1", (self.tenant_id, PROJECT, task.run_id, task.input_request["requested_at"]))
+                    if await cursor.fetchone() is None:
+                        raise RequestConflictError("new input required before resume")
                 cursor = await connection.execute("SELECT id FROM testpilot.operations WHERE tenant_id=%s AND project_id=%s AND run_id=%s AND state IN ('DISPATCHING','PENDING','UNKNOWN') LIMIT 1", (self.tenant_id, PROJECT, task.run_id))
                 unresolved = await cursor.fetchone()
                 state = "WAITING_EXTERNAL" if unresolved else "WAITING_APPROVAL" if task.paused_from == "WAITING_APPROVAL" else "QUEUED"
-                await connection.execute("UPDATE testpilot.tasks SET state=%s,paused_from=NULL,lease_owner=NULL,lease_until=NULL,lease_epoch=lease_epoch+1,next_wakeup_at=CASE WHEN %s THEN clock_timestamp() ELSE NULL END WHERE tenant_id=%s AND project_id=%s AND id=%s", (state, bool(unresolved), self.tenant_id, PROJECT, task.id))
+                await connection.execute("UPDATE testpilot.tasks SET state=%s,paused_from=NULL,input_request=NULL,lease_owner=NULL,lease_until=NULL,lease_epoch=lease_epoch+1,next_wakeup_at=CASE WHEN %s THEN clock_timestamp() ELSE NULL END WHERE tenant_id=%s AND project_id=%s AND id=%s", (state, bool(unresolved), self.tenant_id, PROJECT, task.id))
                 kind = "task.resume_requested"
             else:
                 if task.state not in {"QUEUED","WAITING_APPROVAL","RUNNING","WAITING_EXTERNAL","RECONCILING"}:
@@ -319,6 +325,31 @@ class Ledger:
             fresh = await self._get(connection, task.id, actor)
             assert fresh is not None
             return fresh
+
+    async def wait_input(self, task: TaskRow, request: InputRequest) -> None:
+        async with self.connection() as connection:
+            fresh = await self._fence(connection, task)
+            await self._deadline(connection, fresh)
+            if fresh.state != "RUNNING" or fresh.cancel_requested:
+                raise LeaseLostError("input wait not admitted")
+            cursor = await connection.execute("SELECT clock_timestamp() AS now")
+            now = await cursor.fetchone()
+            assert now is not None
+            body: dict[str, object] = {**request.model_dump(), "requested_at": now["now"].isoformat()}
+            await connection.execute("UPDATE testpilot.tasks SET state='PAUSED',paused_from='RUNNING',input_request=%s,lease_owner=NULL,lease_until=NULL,lease_epoch=lease_epoch+1 WHERE tenant_id=%s AND project_id=%s AND id=%s", (Jsonb(body), self.tenant_id, PROJECT, task.id))
+            await self._event(connection, task, "task.input_required", {"reason": request.reason})
+
+    async def reserve_repair(self, task: TaskRow) -> bool:
+        async with self.connection() as connection:
+            fresh = await self._fence(connection, task)
+            await self._deadline(connection, fresh)
+            if fresh.cancel_requested or fresh.state != "RUNNING" or fresh.model_rounds >= fresh.model_limit:
+                return False
+            cursor = await connection.execute("UPDATE testpilot.task_runs SET report_repairs=1 WHERE tenant_id=%s AND project_id=%s AND id=%s AND report_repairs=0 RETURNING id", (self.tenant_id, PROJECT, task.run_id))
+            if await cursor.fetchone() is None:
+                return False
+            await self._event(connection, task, "report.repair_reserved", {"limit": 1})
+            return True
 
     async def add_input(self, task_id: str, actor: str, request_id: str, text: str) -> tuple[TaskRow, bool]:
         payload_hash = hashlib.sha256(text.encode()).hexdigest()
@@ -453,10 +484,21 @@ class Ledger:
             row = await cursor.fetchone()
             return row["report"] if row else None
 
+    async def _capacity(self, connection: AsyncConnection[dict[str, Any]], actor: str,
+                        project_limit: int, user_limit: int, global_limit: int) -> None:
+        if min(project_limit, user_limit, global_limit) < 1:
+            raise ValueError("capacity limits must be positive")
+        cursor = await connection.execute("SELECT count(*) AS global_count,count(*) FILTER (WHERE tenant_id=%s AND project_id=%s) AS project_count,count(*) FILTER (WHERE tenant_id=%s AND project_id=%s AND actor_id=%s) AS user_count FROM testpilot.tasks WHERE state IN ('QUEUED','WAITING_APPROVAL','RUNNING','WAITING_EXTERNAL','RECONCILING','PAUSED','CANCELLING')", (self.tenant_id, PROJECT, self.tenant_id, PROJECT, actor))
+        row = await cursor.fetchone()
+        if row is None or row["global_count"] >= global_limit or row["project_count"] >= project_limit or row["user_count"] >= user_limit:
+            raise CapacityReachedError("admission capacity reached")
+
     async def rerun(self, task_id: str, actor: str, key: str, expected_version: int,
-                    reason: str, max_active: int = 10) -> tuple[TaskRow, str, bool]:
+                    reason: str, max_active: int = 10, *, max_user_active: int = 10,
+                    max_global_active: int = 1000) -> tuple[TaskRow, str, bool]:
         payload_hash = hashlib.sha256(json.dumps([expected_version, reason]).encode()).hexdigest()
         async with self.connection() as connection:
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('testpilot:global-admission',0))")
             await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (self.tenant_id+":"+PROJECT,))
             cursor = await connection.execute("SELECT * FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND id=%s AND actor_id=%s FOR UPDATE", (self.tenant_id, PROJECT, task_id, actor))
             row = await cursor.fetchone()
@@ -478,17 +520,14 @@ class Ledger:
             cursor = await connection.execute("SELECT id FROM testpilot.operations WHERE tenant_id=%s AND project_id=%s AND task_id=%s AND state IN ('DISPATCHING','PENDING','UNKNOWN') LIMIT 1", (self.tenant_id, PROJECT, task.id))
             if await cursor.fetchone():
                 raise RequestConflictError("unresolved old operation requires reconciliation")
-            cursor = await connection.execute("SELECT count(*) AS count FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND state IN ('QUEUED','WAITING_APPROVAL','RUNNING','WAITING_EXTERNAL','RECONCILING','PAUSED','CANCELLING')", (self.tenant_id, PROJECT))
-            count = await cursor.fetchone()
-            if count is None or count["count"] >= max_active:
-                raise CapacityReachedError("queue capacity reached")
+            await self._capacity(connection, actor, max_active, max_user_active, max_global_active)
             await connection.execute("INSERT INTO testpilot.run_results (tenant_id,project_id,task_id,run_id,state,report,error) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (self.tenant_id, PROJECT, task.id, task.run_id, task.state, Jsonb(task.report) if task.report else None, task.error))
             cursor = await connection.execute("SELECT max(sequence)+1 AS sequence FROM testpilot.task_runs WHERE tenant_id=%s AND project_id=%s AND task_id=%s", (self.tenant_id, PROJECT, task.id))
             sequence = await cursor.fetchone()
             assert sequence is not None
             run_id = "run_"+uuid4().hex
             await connection.execute("INSERT INTO testpilot.task_runs (tenant_id,project_id,id,task_id,sequence,target) VALUES (%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, run_id, task.id, sequence["sequence"], Jsonb(task.target.model_dump())))
-            await connection.execute("UPDATE testpilot.tasks SET run_id=%s,state=%s,report=NULL,error=NULL,lease_owner=NULL,lease_until=NULL,lease_epoch=lease_epoch+1,next_wakeup_at=NULL,cancel_requested=false,paused_from=NULL,progress_json='{}'::jsonb WHERE tenant_id=%s AND project_id=%s AND id=%s", (run_id, "WAITING_APPROVAL" if task.approval_required else "QUEUED", self.tenant_id, PROJECT, task.id))
+            await connection.execute("UPDATE testpilot.tasks SET run_id=%s,state=%s,report=NULL,error=NULL,lease_owner=NULL,lease_until=NULL,lease_epoch=lease_epoch+1,next_wakeup_at=NULL,cancel_requested=false,paused_from=NULL,input_request=NULL,progress_json='{}'::jsonb WHERE tenant_id=%s AND project_id=%s AND id=%s", (run_id, "WAITING_APPROVAL" if task.approval_required else "QUEUED", self.tenant_id, PROJECT, task.id))
             fresh = await self._get(connection, task.id, actor)
             assert fresh is not None
             await connection.execute("INSERT INTO testpilot.run_requests VALUES (%s,%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, task.id, actor, key, payload_hash, run_id))

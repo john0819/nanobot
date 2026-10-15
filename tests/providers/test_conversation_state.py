@@ -19,6 +19,29 @@ from nanobot.providers.conversation_state import (
 )
 
 
+def test_restored_governed_projection_does_not_replay_pending_or_consumed_tool_results():
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = True
+    pending = {"role": "tool", "tool_call_id": "pending", "content": "pending result"}
+    state = ProviderConversationState(kind="test", provider="test", model="model", version=1,
+                                      payload={}, pending_messages=[pending])
+    initial = [{"role": "user", "content": "task", "_meta": {"provider_state_boundary": True}}, pending]
+    owner = ProviderConversationStateController(provider=provider, model="model", messages=initial, state=state)
+    note = {"role": "user", "content": "new owner input"}
+    messages = initial+[note]
+    context = owner.prepare_request(messages, context_window_tokens=10000, model_messages=messages)
+    assert context.conversation_state.pending_messages == [pending, note]
+    assert owner.checkpoint(messages, model_messages=messages).pending_messages == [pending, note]
+
+    consumed = {"role": "tool", "tool_call_id": "consumed", "content": "already in opaque payload"}
+    latest = {"role": "tool", "tool_call_id": "latest", "content": "new result"}
+    restored = ProviderConversationState(kind="test", provider="test", model="model", version=1, payload={})
+    initial = [{"role": "user", "content": "old task", "_meta": {"provider_state_boundary": True}}, consumed]
+    owner = ProviderConversationStateController(provider=provider, model="model", messages=initial, state=restored)
+    context = owner.prepare_request(initial+[latest], context_window_tokens=10000, model_messages=initial+[latest])
+    assert context.conversation_state.pending_messages == [latest]
+
+
 def _provider(*, resumable: bool = True, compact: bool = False) -> MagicMock:
     provider = MagicMock(spec=LLMProvider)
     provider.can_resume_conversation_state.return_value = resumable

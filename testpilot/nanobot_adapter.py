@@ -6,6 +6,8 @@ import re
 import time
 from typing import Any
 
+from pydantic import TypeAdapter
+
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.agent.tools.base import Tool
@@ -13,7 +15,14 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, ProviderConversationState, ToolCallRequest
 from nanobot.utils.helpers import estimate_prompt_tokens_chain
 from nanobot.utils.llm_runtime import LLMRuntime
-from testpilot.analysis_tools import ArtifactTool, CaseTool, KnowledgeTool, MemoryTool, PlanTool
+from testpilot.analysis_tools import (
+    ArtifactTool,
+    CaseTool,
+    InputTool,
+    KnowledgeTool,
+    MemoryTool,
+    PlanTool,
+)
 from testpilot.artifacts import digest
 from testpilot.context import ContextBudgetError, input_budget
 from testpilot.domain import PendingExecution, ReportCandidate
@@ -22,6 +31,7 @@ from testpilot.executor_contract import FixtureExecutor
 from testpilot.progress import ProgressStalledError, ProgressState, advance
 from testpilot.runtime_contracts import RunControls, RuntimeYieldError
 from testpilot.source_tools import CodeTool, GitLabTool, ManifestTool
+from testpilot.task_controls import InputRequest, InputRequiredError
 from testpilot.telemetry import TraceRecord
 from testpilot.transcript import SnapshotIncompatibleError, project
 
@@ -90,6 +100,9 @@ async def run_task(
     tools = ToolRegistry()
     fixture = FixtureTool(executor)
     tools.register(fixture)
+    input_tool = InputTool()
+    if controls and controls.enable_input_requests:
+        tools.register(input_tool)
     if controls and controls.git_source:
         expected = controls.git_source.manifest
         if executor.target.commit_sha != expected.commit_sha or executor.target.source_revision_kind != "GIT_COMMIT" or executor.target.suite_hash != expected.suite_hash():
@@ -126,17 +139,23 @@ async def run_task(
                                      {"role": "user", "content": controls.task_context if controls and controls.task_context else f"Validate suite for task {executor.task_id}."}]
     partial: dict[str, dict[str, Any]] = {}
     resumed_provider_state: ProviderConversationState | None = None
+    restored_candidate: str | None = None
+    restored_final = False
+    is_repair = False
 
     async def checkpoint(body: dict[str, Any]) -> None:
         if controls is not None:
             payload = private_checkpoint(body)
             payload.update(schema_version=2, runtime_fingerprint=fingerprint, messages=messages,
-                           projected_inputs=sorted(projected_inputs))
+                           projected_inputs=sorted(projected_inputs), report_repair=is_repair)
             await controls.checkpoint(payload)
 
     if controls and controls.restore:
         saved = controls.restore
         saved.check_version(fingerprint)
+        is_repair = saved.report_repair
+        if is_repair:
+            tools = ToolRegistry()  # A resumed report repair must never regain execution tools.
         messages = saved.messages
         projected_inputs.update(saved.projected_inputs)
         # A partially completed tool round is reconstructed by ID, never by replaying an unknown write.
@@ -152,7 +171,7 @@ async def run_task(
                     continue
                 name = call["function"]["name"]
                 tool = tools.get(name)
-                if tool is None or (not tool.read_only and name not in {"run_gateway_fixture", "propose_plan"}):
+                if tool is None or (not tool.read_only and name not in {"run_gateway_fixture", "propose_plan", "request_input"}):
                     raise SnapshotIncompatibleError("Unresolved write cannot be automatically replayed")
                 if controls.before_action:
                     await controls.before_action()
@@ -180,9 +199,16 @@ async def run_task(
             resumed_provider_state = restored_state.with_pending_messages([
                 observations.get(message.get("tool_call_id"), message) if message.get("role") == "tool" else message
                 for message in restored_state.pending_messages])
+        if saved.phase == "tools_completed" and starts and any(call["function"]["name"] == "request_input" for call in messages[starts[-1]]["tool_calls"]):
+            fresh_inputs = await controls.inputs() if controls.inputs else []
+            if not any(str(note["client_request_id"]) not in projected_inputs for note in fresh_inputs):
+                for message in messages[starts[-1]+1:]:
+                    if message.get("name") == "request_input":
+                        input_tool.pending = InputRequest.model_validate(json.loads(message["content"])["request"])
+                        raise InputRequiredError(input_tool.pending)
         if saved.phase == "final_response" and messages and messages[-1].get("role") == "assistant" and not messages[-1].get("tool_calls"):
-            return await asyncio.to_thread(build_report, task_id=executor.task_id, target=executor.target, record=executor.record,
-                                           store=executor.store, candidate_json=candidate_text(messages[-1].get("content")))
+            restored_final = True
+            restored_candidate = candidate_text(messages[-1].get("content"))
 
     class DurableGuard(AgentHook):
         round_started: float = 0
@@ -201,6 +227,8 @@ async def run_task(
 
         async def before_execute_tools(self, context: AgentHookContext) -> None:
             await self.model_trace(context)
+            if any(call.name == "request_input" for call in context.tool_calls) and len(context.tool_calls) != 1:
+                raise ContextBudgetError("Input request must be the only action in a tool round")
             partial.clear()
             if len(context.tool_calls) > 16:
                 raise ContextBudgetError("Tool batch exceeds task action budget")
@@ -222,6 +250,7 @@ async def run_task(
             if controls:
                 payload = {"phase": "partial_tools", "schema_version": 2, "runtime_fingerprint": fingerprint,
                            "messages": messages+list(partial.values()), "projected_inputs": sorted(projected_inputs)}
+                payload["report_repair"] = is_repair
                 await controls.checkpoint(payload)
 
         async def before_iteration(self, context: AgentHookContext) -> None:
@@ -259,6 +288,8 @@ async def run_task(
             await self.model_trace(context)
             if context.error:
                 await checkpoint({"phase": "provider_error", "stop_reason": context.stop_reason, "private_error": context.error})
+            if input_tool.pending is not None:
+                raise InputRequiredError(input_tool.pending)
             if fixture.pending is not None:
                 # Runner has appended all tool results and saved tools_completed checkpoint.
                 raise RuntimeYieldError(fixture.pending)
@@ -275,22 +306,48 @@ async def run_task(
                 if progress_state.stalled:
                     raise ProgressStalledError("Repeated observations without progress")
 
+    async def validate_and_repair(candidate: str | None, stop_reason: str, rounds: int,
+                                  state: ProviderConversationState | None) -> dict[str, object]:
+        nonlocal is_repair
+        report = await asyncio.to_thread(build_report, task_id=executor.task_id, target=executor.target,
+            record=executor.record, store=executor.store, candidate_json=candidate, runner_stop_reason=stop_reason)
+        gaps = TypeAdapter(list[str]).validate_python(report["validation_gaps"])
+        repairable = bool(gaps) and all(
+            str(gap) in {"INVALID_REPORT_CANDIDATE", "CANDIDATE_SCOPE_MISMATCH"} or str(gap).startswith("UNSUPPORTED_CLAIM:") for gap in gaps)
+        if not is_repair and stop_reason == "completed" and repairable and controls and controls.reserve_repair and await controls.reserve_repair():
+            is_repair = True
+            repair_message = {"role": "user", "content": json.dumps({"action": "REPAIR_REPORT_ONCE",
+                "validation_gaps": gaps, "rule": "Return corrected ReportCandidate JSON only. Retain actual failures, counts, target and evidence IDs. No tools or new execution permitted."})}
+            messages.append(repair_message)
+            repair_state = state.with_pending_messages([*state.pending_messages, repair_message]) if state else None
+            repaired = await AgentRunner().run(AgentRunSpec(initial_messages=messages, tools=ToolRegistry(), runtime=captured,
+                provider_state=repair_state, max_iterations=1, max_tool_result_chars=16000,
+                concurrent_tools=False, finalize_on_max_iterations=False, consolidate_history=retain_raw_history,
+                checkpoint_callback=checkpoint, hook=DurableGuard(reraise=True)))
+            report = await asyncio.to_thread(build_report, task_id=executor.task_id, target=executor.target,
+                record=executor.record, store=executor.store, candidate_json=candidate_text(repaired.final_content),
+                runner_stop_reason=repaired.stop_reason)
+            rounds += len(repaired.round_usages)
+            stop_reason = repaired.stop_reason
+            report["report_repair_attempted"] = True
+        if is_repair:
+            report["report_repair_attempted"] = True
+        report["model_rounds"] = rounds
+        report["agent_stop_reason"] = stop_reason
+        return report
+
+    if restored_final:
+        return await validate_and_repair(restored_candidate, "completed", 0, resumed_provider_state)
     result = await AgentRunner().run(AgentRunSpec(
         initial_messages=messages, tools=tools,
         provider_state=resumed_provider_state,
         runtime=captured,
-        max_iterations=controls.max_iterations if controls else 4, max_tool_result_chars=16000,
+        max_iterations=1 if is_repair else controls.max_iterations if controls else 4, max_tool_result_chars=16000,
         session_key=f"testpilot:{executor.task_id}", concurrent_tools=False,
         finalize_on_max_iterations=False,
         consolidate_history=retain_raw_history,
         checkpoint_callback=checkpoint if controls else None,
         hook=DurableGuard(reraise=True),
     ))
-    report = await asyncio.to_thread(build_report,
-        task_id=executor.task_id, target=executor.target, record=executor.record,
-        store=executor.store, candidate_json=candidate_text(result.final_content),
-        runner_stop_reason=result.stop_reason,
-    )
-    report["model_rounds"] = len(result.round_usages)
-    report["agent_stop_reason"] = result.stop_reason
-    return report
+    return await validate_and_repair(candidate_text(result.final_content), result.stop_reason,
+                                     len(result.round_usages), result.provider_state)

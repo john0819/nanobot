@@ -10,6 +10,7 @@ from psycopg.errors import RaiseException
 
 from testpilot.baseline import FORK_BASELINE_SHA
 from testpilot.container_runner import container_target
+from testpilot.defects import Defects, DraftDecision
 from testpilot.demo_provider import ScriptedProvider
 from testpilot.durable_api import create_app
 from testpilot.history import MemoryDecision
@@ -17,6 +18,7 @@ from testpilot.memory import MemoryRepository
 from testpilot.nanobot_adapter import run_task
 from testpilot.recoverable_runner import docker
 from testpilot.storage.postgres import BudgetExhaustedError, Ledger, RequestConflictError
+from testpilot.storage_contracts import local_artifacts
 from testpilot.task_api import Principal
 
 DSN = os.environ.get("TESTPILOT_DATABASE_URL", "")
@@ -64,6 +66,43 @@ async def terminal(ledger, task_id):
             return task
         await asyncio.sleep(0.03)
     raise AssertionError("Task deadline")
+
+
+async def test_failure_draft_is_scoped_immutable_and_requires_independent_evidence_review(ledger, tmp_path):
+    async with TestClient(TestServer(app(ledger, tmp_path))) as client:
+        response = await client.post("/v1/tasks", json={"mode": "retry-write-bug"}, headers=headers(key="defect"))
+        task_id = (await response.json())["task_id"]
+        done = await terminal(ledger, task_id)
+        assert done.state == "COMPLETED" and done.report["quality_verdict"] == "FAIL"
+        spec = {"run_id": done.run_id, "case_id": done.report["findings"][0]["case_id"]}
+        route = f"/v1/tasks/{task_id}/defects"
+        created = await client.post(route, json=spec, headers=headers())
+        assert created.status == 201
+        draft = await created.json()
+        assert draft["content"]["submission_supported"] is False
+        assert (await (await client.post(route, json=spec, headers=headers())).json())["id"] == draft["id"]
+        assert (await client.post(route, json=spec, headers=headers(CHARLIE))).status == 404
+        assert (await (await client.get("/v1/defects", headers=headers(CHARLIE))).json())["drafts"] == []
+        assert (await client.get("/v1/defects?review=true", headers=headers(CHARLIE))).status == 403
+        decision = {"expected_version": 1, "content_hash": draft["content_hash"], "decision": "APPROVE"}
+        repository = Defects(ledger, tmp_path, local_artifacts)
+        with pytest.raises(RequestConflictError):
+            await repository.decide(draft["id"], "alice", DraftDecision.model_validate(decision))
+        decision_path = f"/v1/defects/{draft['id']}/decision"
+        assert (await client.post(decision_path, json={**decision, "content_hash": "f"*64}, headers=headers(BOB))).status == 409
+        store = local_artifacts(tmp_path, ledger.tenant_id, task_id)
+        ref = done.report["artifact_refs"][0]
+        original = store.read(ref)
+        path = store.root/ref
+        path.write_bytes(b"corrupt")
+        assert (await client.post(decision_path, json=decision, headers=headers(BOB))).status == 409
+        path.write_bytes(original)
+        approved = await client.post(decision_path, json=decision, headers=headers(BOB))
+        assert approved.status == 200 and (await approved.json())["status"] == "APPROVED"
+        assert (await client.post(decision_path, json=decision, headers=headers(BOB))).status == 409
+        async with ledger.connection() as connection:
+            cursor = await connection.execute("SELECT version,type FROM testpilot.defect_events WHERE tenant_id=%s AND defect_id=%s ORDER BY version", (ledger.tenant_id, draft["id"]))
+            assert [row["version"] for row in await cursor.fetchall()] == [1, 2]
 
 
 async def test_explicit_rerun_preserves_failure_and_shares_budget(ledger, tmp_path):

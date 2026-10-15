@@ -136,10 +136,11 @@ class ProviderConversationStateController:
             if model_messages is not None and durable_messages
             else None
         )
-        request_messages = (
+        request_messages = self._unreplayed_tool_results(
             governed_messages
             if governed_messages is not None
-            else durable_messages
+            else durable_messages,
+            durable_messages,
         )
         supplemental = deepcopy(supplemental_messages or [])
         self._request_messages = deepcopy(request_messages)
@@ -229,15 +230,30 @@ class ProviderConversationStateController:
             if model_messages is not None and durable_messages
             else None
         )
-        pending_messages = (
+        pending_messages = self._unreplayed_tool_results(
             governed_messages
             if governed_messages is not None
-            else durable_messages
+            else durable_messages,
+            durable_messages,
         )
         return self._state.with_pending_messages([
             *self._state.pending_messages,
             *pending_messages,
         ])
+
+    def _unreplayed_tool_results(self, messages: list[dict[str, Any]],
+                                durable_delta: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """A restored pending result must not be re-added by a governed input projection.
+
+        The compaction view can retain an earlier boundary than the restored raw
+        transcript. New user input then exposes old tool results again. Their IDs
+        are already owned by pending_messages, so forward each result only once.
+        """
+        owned = {item.get("tool_call_id") for item in self._state.pending_messages
+                 if item.get("role") == "tool"} if self._state else set()
+        current = {item.get("tool_call_id") for item in durable_delta if item.get("role") == "tool"}
+        return [item for item in messages if item.get("role") != "tool"
+                or (item.get("tool_call_id") in current and item.get("tool_call_id") not in owned)]
 
     def finish(
         self,

@@ -1,0 +1,21 @@
+{
+  "task_id": "task_2ee6a63f610a4d7595ccd66d91f8915b",
+  "model_kind": "configured-real-model",
+  "input_required_and_resumed": true,
+  "paused_model_rounds": 1,
+  "model_rounds": 4,
+  "report_validated": true,
+  "quality_verdict": "FAIL",
+  "passed": 3,
+  "failed": 1,
+  "defect_id": "defect_0f122be184e94e7ebe683ad72f06b8c5",
+  "defect_status": "APPROVED",
+  "external_submission": false,
+  "self_review_rejected": true,
+  "job_count": 1,
+  "date": "2026-10-15",
+  "model": "deepseek-flash",
+  "endpoint": "https://api.deepseek.com",
+  "validation_failed_attempts": 3,
+  "failed_attempt_reason": "duplicate tool output from restored governed projection; rejected by provider; not counted as successful acceptance"
+}

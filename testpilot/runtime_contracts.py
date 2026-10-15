@@ -40,3 +40,5 @@ class RunControls:
     trace: Callable[[TraceRecord], Awaitable[None]] | None = None
     git_source: GitSource | None = None
     gitlab: GitLabAdapter | None = None
+    enable_input_requests: bool = False
+    reserve_repair: Callable[[], Awaitable[bool]] | None = None

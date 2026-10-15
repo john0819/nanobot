@@ -20,6 +20,7 @@ class Transcript(BaseModel):
     messages: list[dict[str, Any]]
     projected_inputs: list[str] = Field(default_factory=list)
     provider_state: dict[str, Any] | None = None
+    report_repair: bool = False
 
     def check_version(self, fingerprint: str) -> None:
         if self.schema_version != 2 or self.runtime_fingerprint != fingerprint:

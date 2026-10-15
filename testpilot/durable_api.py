@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from testpilot.artifacts import ArtifactUnavailableError
 from testpilot.console import register as register_console
+from testpilot.defects import Defects, DraftDecision, DraftRequest
 from testpilot.domain import Target
 from testpilot.durable_runtime import DurableTaskRunner, WorkerPool
 from testpilot.event_stream import stream
@@ -48,6 +49,7 @@ def create_app(
     knowledge: MCPKnowledgeClient | None = None,
     model_limit: int = 12,
     runner: RunnerFactory = RetainedRunner,
+    max_active_tasks: int = 10, max_user_active_tasks: int = 10, max_global_active_tasks: int = 1000,
 ) -> web.Application:
     if identity is None and (not tokens or any(len(token) < 32 or owner.tenant_id != ledger.tenant_id for token, owner in tokens.items())):
         raise ValueError("strong local identity tokens matching DB scope required")
@@ -55,6 +57,40 @@ def create_app(
     root = root.resolve()
     pool = WorkerPool(ledger, root, image, run, workers, lease_seconds, poll_delay, artifacts, knowledge, runner)
     scheduler = JobScheduler(ledger, root, image, lease_seconds, poll_delay, artifacts, runner)
+    defects = Defects(ledger, root, artifacts)
+
+    async def defect_create(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        owner = await auth(request)
+        permission(owner, "executor")
+        try:
+            spec = DraftRequest.model_validate_json(await request.read())
+            draft = await defects.propose(task, spec)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid defect draft contract") from None
+        except (ValueError, OSError):
+            raise web.HTTPConflict(text="Validated failure evidence required") from None
+        return web.json_response(draft.model_dump(mode="json"), status=201)
+
+    async def defect_list(request: web.Request) -> web.Response:
+        owner = await auth(request)
+        reviewer = request.query.get("review") == "true"
+        if reviewer:
+            permission(owner, "reviewer")
+        rows = await defects.list(owner.user_id, reviewer)
+        return web.json_response({"drafts": [row.model_dump(mode="json") for row in rows]})
+
+    async def defect_decide(request: web.Request) -> web.Response:
+        owner = await auth(request)
+        permission(owner, "reviewer")
+        try:
+            spec = DraftDecision.model_validate_json(await request.read())
+            fresh = await defects.decide(request.match_info["defect_id"], owner.user_id, spec)
+        except ValidationError:
+            raise web.HTTPUnprocessableEntity(text="Invalid defect decision") from None
+        except (ValueError, OSError):
+            raise web.HTTPConflict(text="Draft reviewer/version/hash/evidence/state conflict") from None
+        return web.json_response(fresh.model_dump(mode="json"))
 
     async def auth(request: web.Request) -> Principal:
         try:
@@ -123,7 +159,8 @@ def create_app(
         except ValidationError:
             raise web.HTTPUnprocessableEntity(text="Invalid task contract") from None
         try:
-            task, created = await ledger.admit(owner.user_id, key, spec.mode, target(spec.mode), goal=spec.goal,
+            task, created = await ledger.admit(owner.user_id, key, spec.mode, target(spec.mode), max_active=max_active_tasks,
+                                               max_user_active=max_user_active_tasks, max_global_active=max_global_active_tasks, goal=spec.goal,
                                                approval_required=require_approval or spec.require_approval,
                                                knowledge_required=spec.require_knowledge, model_limit=model_limit)
         except RequestConflictError:
@@ -299,7 +336,8 @@ def create_app(
             raise web.HTTPUnprocessableEntity(text="Idempotency-Key required")
         try:
             spec = RerunRequest.model_validate_json(await request.read())
-            fresh, run_id, created = await ledger.rerun(task.id, owner.user_id, key, spec.expected_state_version, spec.reason)
+            fresh, run_id, created = await ledger.rerun(task.id, owner.user_id, key, spec.expected_state_version, spec.reason,
+                max_active=max_active_tasks, max_user_active=max_user_active_tasks, max_global_active=max_global_active_tasks)
         except ValidationError:
             raise web.HTTPUnprocessableEntity(text="Invalid rerun contract") from None
         except (RequestConflictError, BudgetExhaustedError):
@@ -396,6 +434,9 @@ def create_app(
     app.router.add_get("/v1/tasks/{task_id}/plan", plan)
     app.router.add_get("/v1/tasks/{task_id}/traces", traces)
     app.router.add_get("/metrics", metrics)
+    app.router.add_post("/v1/tasks/{task_id}/defects", defect_create)
+    app.router.add_get("/v1/defects", defect_list)
+    app.router.add_post("/v1/defects/{defect_id}/decision", defect_decide)
     app.on_startup.append(startup)
     app.on_cleanup.append(shutdown)
     return app

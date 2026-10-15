@@ -388,6 +388,9 @@ class TestPilotConfig(Base):
     gitlab_token: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
     runner_endpoint: str | None = None
     runner_max_jobs: int = Field(default=4, ge=1, le=16)
+    max_active_tasks: int = Field(default=10, ge=1, le=1000)
+    max_user_active_tasks: int = Field(default=10, ge=1, le=1000)
+    max_global_active_tasks: int = Field(default=1000, ge=1, le=100000)
     runner_service_token: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
 
     @model_validator(mode="after")

@@ -15,6 +15,27 @@ from testpilot.executor_contract import FixtureExecutor
 from testpilot.governance import TaskPlan
 from testpilot.knowledge import KnowledgeResult
 from testpilot.runtime_contracts import RunControls
+from testpilot.task_controls import InputRequest
+
+
+class InputTool(Tool):
+    pending: InputRequest | None = None
+
+    @property
+    def name(self) -> str:
+        return "request_input"
+
+    @property
+    def description(self) -> str:
+        return "Ask the task owner for missing context, then suspend until new input and explicit resume. Cannot change target, assertions, permissions or budget. Call alone."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return InputRequest.model_json_schema()
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.pending = InputRequest.model_validate_json(json.dumps(kwargs))
+        return json.dumps({"status": "INPUT_REQUIRED", "request": self.pending.model_dump()})
 
 
 class PlanTool(Tool):

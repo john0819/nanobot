@@ -111,8 +111,8 @@ function clearIdentity() {
   stop(); identityEpoch++; bearer = ""; selected = ""; approval = null; snapshot = null;
   pendingInput = null; el("input-text").value = "";
   ["snapshot", "plan", "report", "approval-detail", "inputs"].forEach(id => show(id, null));
-  ["tasks", "events", "artifacts", "runs", "memories"].forEach(id => el(id).replaceChildren());
-  ["task-id", "source-run", "source-case"].forEach(id => { el(id).value = ""; });
+  ["tasks", "events", "artifacts", "runs", "memories", "defects"].forEach(id => el(id).replaceChildren());
+  ["task-id", "source-run", "source-case", "defect-run", "defect-case"].forEach(id => { el(id).value = ""; });
 }
 action("connect", async () => { const token = el("token").value.trim(); clearIdentity(); bearer = token; el("token").value = ""; await tasks(); });
 action("logout", async () => { clearIdentity(); el("token").value = ""; });
@@ -156,3 +156,24 @@ for (const [id, decision] of [["approve", "APPROVE"], ["deny", "DENY"]]) action(
   await api(path + "/approval", { method: "POST", body: JSON.stringify({ decision, request_hash: approval.request_hash }) }); await details(path);
 });
 window.addEventListener("pagehide", stop);
+
+async function defectDrafts(review = false) {
+  const result = await api(`/v1/defects?review=${review}`); el("defects").replaceChildren();
+  for (const item of result.drafts) {
+    const block = document.createElement("div"), text = document.createElement("pre");
+    text.textContent = JSON.stringify(item, null, 2); block.append(text);
+    if (review && item.status === "DRAFT") for (const decision of ["APPROVE", "DENY"]) {
+      const button = document.createElement("button"); button.textContent = decision === "APPROVE" ? "批准此草稿内容" : "拒绝草稿";
+      button.onclick = async () => { try {
+        await api(`/v1/defects/${item.id}/decision`, { method: "POST", body: JSON.stringify({ expected_version: item.version, content_hash: item.content_hash, decision }) });
+        await defectDrafts(review);
+      } catch (error) { el("notice").textContent = error.message; } }; block.append(button);
+    }
+    el("defects").append(block);
+  }
+}
+action("defect-list", () => defectDrafts()); action("defect-review", () => defectDrafts(true));
+action("defect-create", async () => {
+  await api(taskPath() + "/defects", { method: "POST", body: JSON.stringify({ run_id: el("defect-run").value.trim(), case_id: el("defect-case").value.trim() }) });
+  await defectDrafts();
+});

@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from nanobot.providers.base import LLMResponse, ToolCallRequest
 from testpilot.artifacts import ArtifactStore
 from testpilot.baseline import FORK_BASELINE_SHA
 from testpilot.container_runner import container_target
@@ -23,6 +24,7 @@ from testpilot.storage.postgres import (
     RequestConflictError,
 )
 from testpilot.task_api import Principal
+from testpilot.task_controls import InputRequest
 
 DSN = os.environ.get("TESTPILOT_DATABASE_URL", "")
 IMAGE = os.environ.get("TESTPILOT_RUNNER_IMAGE", "")
@@ -64,6 +66,52 @@ async def wait_task(ledger, task_id, states):
             return task
         await asyncio.sleep(0.03)
     raise AssertionError("task state deadline")
+
+
+async def test_agent_requests_private_input_then_resumes_same_run_after_restart(ledger, tmp_path):
+    class AskingProvider(ScriptedProvider):
+        async def chat(self, messages, **kwargs):
+            if not any(m.get("name") == "request_input" for m in messages):
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(id="ask", name="request_input",
+                    arguments={"question": "Which reviewed contract applies?", "reason": "ASSERTION_SOURCE"})])
+            assert any("Use admitted assertions" in str(m.get("content", "")) for m in messages)
+            return await super().chat(messages, **kwargs)
+
+    async def asking(executor, controls):
+        provider = AskingProvider()
+        return await run_task(executor, provider, provider.get_default_model(), controls=controls)
+
+    async with TestClient(TestServer(app(ledger, tmp_path, run=asking))) as client:
+        response = await client.post("/v1/tasks", json={"mode": "healthy"}, headers=HEADERS)
+        task_id = (await response.json())["task_id"]
+        paused = await wait_task(ledger, task_id, {"PAUSED"})
+        assert paused.input_request["reason"] == "ASSERTION_SOURCE" and paused.model_rounds == 1
+        assert paused.snapshot()["waiting_reason"] == "INPUT_REQUIRED"
+        assert (await client.post(f"/v1/tasks/{task_id}/resume", json={"expected_state_version": paused.state_version}, headers=HEADERS)).status == 409
+        events = await ledger.events(paused)
+        assert "Which reviewed" not in str(events)
+        assert await ledger.claim("no-model", kind="agent") is None
+    async with TestClient(TestServer(app(ledger, tmp_path, run=asking))) as client:
+        note = await client.post(f"/v1/tasks/{task_id}/inputs", json={"client_request_id": "answer", "text": "Use admitted assertions"}, headers=HEADERS)
+        fresh = await ledger.get(task_id, "alice")
+        assert note.status == 202
+        assert (await client.post(f"/v1/tasks/{task_id}/resume", json={"expected_state_version": fresh.state_version}, headers=HEADERS)).status == 202
+        done = await wait_task(ledger, task_id, {"COMPLETED", "NEEDS_REVIEW"})
+        assert done.state == "COMPLETED" and done.run_id == paused.run_id
+        assert done.input_request is None
+
+
+async def test_input_request_and_report_repair_preserve_fencing_and_budget(ledger):
+    task, _ = await ledger.admit("alice", "bounded", "healthy", target(ledger))
+    lease = await ledger.claim("worker")
+    assert await ledger.reserve_repair(lease)
+    assert not await ledger.reserve_repair(lease)
+    await ledger.wait_input(lease, InputRequest(question="Need context", reason="MISSING_CONTEXT"))
+    with pytest.raises(LeaseLostError):
+        await ledger.reserve_repair(lease)
+    assert await ledger.claim("agent", kind="agent") is None
+    current = await ledger.get(task.id, "alice")
+    assert current.run_id == lease.run_id and current.model_rounds == 0
 
 
 async def test_pause_fences_worker_and_resume_preserves_budget_and_scope(ledger):

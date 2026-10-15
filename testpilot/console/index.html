@@ -17,5 +17,8 @@
 <h3>审批内容</h3><p>审核目标、执行镜像和请求摘要后提交。相同申请人不能批准自己的任务。</p><pre id="approval-detail"></pre><button id="approve">批准</button><button id="deny">拒绝</button>
 <h3>事件时间线</h3><ol id="events"></ol><h3>验证报告</h3><pre id="report"></pre><div id="artifacts"></div></section>
 <section><h2>经审核的历史经验</h2><p>只从已验证失败生成观察候选，确认后按项目、用户、代码和环境匹配使用；它不证明当前测试结果。</p><label>来源 Run ID <input id="source-run"></label><label>已验证失败 Case ID <input id="source-case"></label><label><input id="memory-shared" type="checkbox">审核后允许项目内共享</label><button id="memory-create">提议经验候选</button><button id="memory-list">查看经验</button><button id="memory-review">待审经验</button><div id="memories"></div></section>
+<section><h2>失败缺陷草稿与独立审核</h2><p>只从验证通过的失败报告生成观察草稿；批准仅表示本地内容审核，不会向外部平台提交。</p>
+<label>来源 Run ID <input id="defect-run"></label><label>已验证失败 Case ID <input id="defect-case"></label>
+<button id="defect-create">生成草稿</button><button id="defect-list">我的草稿</button><button id="defect-review">审核队列</button><div id="defects"></div></section>
 <p id="notice" role="alert"></p>
 </main><script src="/console/app.js" defer></script></body></html>

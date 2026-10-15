@@ -29,6 +29,7 @@ from testpilot.storage.postgres import (
     TaskRow,
 )
 from testpilot.storage_contracts import ArtifactFactory, local_artifacts
+from testpilot.task_controls import InputRequiredError
 from testpilot.transcript import SnapshotIncompatibleError, Transcript
 
 DurableTaskRunner = Callable[["DurableExecutor", RunControls], Awaitable[dict[str, object]]]
@@ -254,6 +255,8 @@ class WorkerPool:
                 mark_inputs=lambda ids: self.ledger.consume_inputs(task, ids),
                 restore=restored,
                 trace=lambda record: self.ledger.record_trace(task, record),
+                enable_input_requests=True,
+                reserve_repair=lambda: self.ledger.reserve_repair(task),
             )
             report = await asyncio.wait_for(self.run(executor, controls), remaining)
             fresh = await self.ledger.heartbeat(task, self.lease_seconds)
@@ -271,6 +274,8 @@ class WorkerPool:
                 if report["knowledge_evidence_ids"]:
                     report["limitations"] = [line.replace("未验证真实 LLM 自主规划效果，RAG 本次未参与执行证据判定。", "知识库提供版本化背景证据；执行结论仍由真实 JUnit 和固定断言决定，自主规划效果需批量评测。") for line in report["limitations"]]
                 await self.ledger.finish(task, report)
+        except InputRequiredError as signal:
+            await self.ledger.wait_input(task, signal.request)
         except RuntimeYieldError as signal:
             if operation is not None:
                 await self.ledger.park(task, operation, signal.pending, self.poll_delay)

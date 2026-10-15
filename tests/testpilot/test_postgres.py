@@ -22,6 +22,30 @@ IMAGE = os.environ.get("TESTPILOT_RUNNER_IMAGE", "sha256:" + "a" * 64)
 pytestmark = pytest.mark.skipif(not DSN, reason="Requires an explicitly configured PostgreSQL test database")
 
 
+async def test_user_and_project_quotas_are_atomic_and_replay_survives_full_quota(ledger):
+    target = container_target(FORK_BASELINE_SHA, "healthy", IMAGE, ledger.tenant_id)
+    results = await asyncio.gather(*[ledger.admit("alice", key, "healthy", target, max_active=2, max_user_active=1)
+                                    for key in ("first", "second")], return_exceptions=True)
+    assert sum(isinstance(result, CapacityReachedError) for result in results) == 1
+    await ledger.admit("bob", "third", "healthy", target, max_active=2, max_user_active=1)
+    with pytest.raises(CapacityReachedError):
+        await ledger.admit("charlie", "fourth", "healthy", target, max_active=2, max_user_active=1)
+    successful_key = "first" if not isinstance(results[0], Exception) else "second"
+    _, created = await ledger.admit("alice", successful_key, "healthy", target, max_active=2, max_user_active=1)
+    assert not created
+
+
+async def test_global_quota_serializes_different_tenants(ledger):
+    other = Ledger(DSN, "global_"+uuid4().hex)
+    async with ledger.connection() as connection:
+        cursor = await connection.execute("SELECT count(*) AS count FROM testpilot.tasks WHERE state NOT IN ('COMPLETED','NEEDS_REVIEW','CANCELLED')")
+        baseline = (await cursor.fetchone())["count"]
+    results = await asyncio.gather(*[repository.admit("alice", "global", "healthy",
+        container_target(FORK_BASELINE_SHA, "healthy", IMAGE, repository.tenant_id), max_global_active=baseline+1)
+        for repository in (ledger, other)], return_exceptions=True)
+    assert sum(isinstance(result, CapacityReachedError) for result in results) == 1
+
+
 @pytest.fixture
 async def ledger():
     repository = Ledger(DSN, "case_" + uuid4().hex)

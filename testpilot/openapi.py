@@ -14,12 +14,24 @@ def document(durable: bool = False) -> dict[str, object]:
     def response(description: str, content: dict[str, object] = json_task) -> dict[str, object]:
         return {"description": description, "content": content}
 
+    defect_paths: dict[str, object] = {}
+    defect_schemas: dict[str, object] = {}
+    if durable:
+        from testpilot.defects import DraftDecision, DraftRequest
+        defect_schemas = {"DraftRequest": DraftRequest.model_json_schema(), "DraftDecision": DraftDecision.model_json_schema()}
+        object_response = {"application/json": {"schema": {"type": "object"}}}
+        defect_paths = {
+            "/v1/tasks/{task_id}/defects": {"post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DraftRequest"}}}}, "responses": {"201": response("Immutable draft derived from validated failure; no external submission", object_response), "401": error, "403": error, "404": error, "409": error, "422": error}}},
+            "/v1/defects": {"get": {"parameters": [{"name": "review", "in": "query", "schema": {"type": "boolean"}}], "responses": {"200": response("Owner drafts or reviewer-authorized project queue", object_response), "401": error, "403": error}}},
+            "/v1/defects/{defect_id}/decision": {"post": {"parameters": [{"name": "defect_id", "in": "path", "required": True, "schema": {"type": "string"}}], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DraftDecision"}}}}, "responses": {"200": response("Independent hash/version-bound local review; evidence rechecked", object_response), "401": error, "403": error, "409": error, "422": error}}}}
+
     return {
         "openapi": "3.1.0", "info": {"title": "TestPilot local Task API", "version": "0.7.0" if durable else "0.2.0",
                                      "description": "PG asynchronous Job scheduler, persistent progress guard and authenticated SSE replay." if durable else "Loopback development only. In-memory task state; no durable recovery."},
         "servers": [{"url": "http://127.0.0.1:8920"}],
         "security": [{"LocalBearer": []}],
         "paths": {
+            **defect_paths,
             **({
                 **{f"/v1/tasks/{{task_id}}/{action}": {"post": {"parameters": [task_id], "requestBody": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StateControl"}}}},
                    "responses": {"202": response("Pause fences Agent leases; resume preserves Run/budget and first reconciles external facts"), "401": error, "403": error, "404": error, "409": error, "422": error}}} for action in ("pause", "resume")},
@@ -89,6 +101,7 @@ def document(durable: bool = False) -> dict[str, object]:
         "components": {
             "securitySchemes": {"LocalBearer": {"type": "http", "scheme": "bearer"}},
             "schemas": {
+                **defect_schemas,
                 "TaskRequest": TaskRequest.model_json_schema(),
                 **({"ApprovalDecision": ApprovalDecision.model_json_schema()} if durable else {}),
                 **({"RerunRequest": RerunRequest.model_json_schema(), "MemoryCandidateRequest": MemoryCandidateRequest.model_json_schema(), "MemoryDecision": MemoryDecision.model_json_schema()} if durable else {}),

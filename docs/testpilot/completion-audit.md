@@ -21,21 +21,23 @@ RAG、Memory、暂停/恢复/私有输入、SSE 和控制台。
 
 ## 实际运行记录
 
-- TestPilot 完整回归 119 passed（36.88 秒）；最近上游兼容集 66 passed，未声称全仓库测试通过。
+- 最新 TestPilot 完整回归 127 passed（41.90 秒）；扩展上游兼容集含 provider 状态测试 78 passed，未声称全仓库测试通过。
 - 真 nanobot CLI API + 独立 Runner，外部 Job 创建后 kill/restart，原 Job 恢复、报告通过，数量为 1。
 - 10 并发：10 个报告通过、10 个唯一外部 Job；最近一轮准入 83.73 ms、全部完成 10.64 秒。
   这是本机短时 smoke，不是可用性 SLO/持续压测。
 - 用户补充本地 `.env` 凭证后，已使用 DeepSeek `deepseek-flash` 实际验收健康/缺陷两条：
   4 PASS 与 3 PASS / 1 FAIL，均正确通过报告校验。真实持久 Runner 恢复结果见本轮验证记录。
   首次缺少环境变量的启动失败和后续失败尝试均保留，没有批量付费评测。
+- 新批次已实现主动补问、单次无执行工具报告修复、不可变失败草稿/独立审核、用户/项目/全局准入配额。
+  真实 DeepSeek 完成补问恢复→3 PASS / 1 FAIL→草稿独立批准，Job 数量=1；见 [业务闭环验证](business-workflow.md)。
 
 ## 仍需实现，不能打勾
 
 1. 完整业务工具：受审核 CasePlan/测试代码生成、断言来源校验、prepare suite、request_id 日志查询，
    同 Run 多 suite/有限重试；当前只执行已审核 suite。
-2. 缺陷草稿 → 具体内容独立审批 → 外部提交，以及提交幂等/对账。
-3. 主动 request_input/WAITING_INPUT、报告修复轮、统一版本化工具目录、熔断及工具候选召回。
-4. task/tool/模型 token/费用总预算、每用户/项目/全局配额；当前只有模型轮数、任务容量、deadline 和 Runner 槽位。
+2. 缺陷外部提交及其幂等/对账；草稿与具体内容独立审核已实现。
+3. 统一版本化工具目录、熔断及工具候选召回；主动补问/报告修复已实现，等待语义为 PAUSED + INPUT_REQUIRED。
+4. task/tool/模型 token/费用总预算与细粒度资源配额；用户/项目/全局活动任务配额、模型轮数、deadline 和 Runner 槽位已实现。
 5. 浏览器 OIDC PKCE/session、通用多项目路由及真实 IdP/GitLab 联调。
 6. 独立 API/Worker/Runner/S3 的完整服务 Compose；当前 Compose 仍为 PG 开发配置。
 7. 产物保留策略、并发安全 GC/孤儿扫描、数据库及对象存储备份恢复演练。

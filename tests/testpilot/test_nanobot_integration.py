@@ -72,6 +72,8 @@ async def test_resume_restores_provider_owned_continuation_and_keeps_state_priva
                 self.restored = True
                 assert state.payload == {"opaque": "private provider data"}
                 assert state.pending_messages[0]["tool_call_id"] == "fixture_call"
+                assert sum(item.get("tool_call_id") == "fixture_call" for item in state.pending_messages) == 1
+                assert any("new owner input" in str(item.get("content", "")) for item in state.pending_messages)
             response = await self.chat(**kwargs)
             if response.tool_calls:
                 response.provider_state = ProviderConversationState(kind="test-continuation", provider="test",
@@ -97,7 +99,8 @@ async def test_resume_restores_provider_owned_continuation_and_keeps_state_priva
             checkpoint=suspend, before_model=AsyncMock(), max_iterations=4))
     assert snapshots[0]["provider_state"] is not None
     report = await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
-        checkpoint=AsyncMock(), before_model=AsyncMock(), max_iterations=4, restore=Transcript.model_validate(snapshots[0])))
+        checkpoint=AsyncMock(), before_model=AsyncMock(), max_iterations=4, restore=Transcript.model_validate(snapshots[0]),
+        inputs=AsyncMock(return_value=[{"client_request_id": "followup", "text": "new owner input"}])))
     assert report["report_validated"] and provider.restored
     assert "opaque" not in json.dumps(report)
 
@@ -192,3 +195,64 @@ async def test_source_drift_after_admission_stops_before_execution(tmp_path, mon
     with pytest.raises(ValueError, match="changed after admission"):
         await executor.execute()
     assert executor.record is None
+
+
+@pytest.mark.parametrize("stay_wrong", [False, True])
+async def test_report_repair_is_bounded_and_cannot_execute_tools(tmp_path, stay_wrong):
+    class RepairProvider(ScriptedProvider):
+        repair_calls = 0
+
+        async def chat(self, messages, tools=None, **kwargs):
+            repairing = any("REPAIR_REPORT_ONCE" in str(m.get("content", "")) for m in messages if m.get("role") == "user")
+            response = await super().chat(messages, tools=tools, **kwargs)
+            if response.tool_calls:
+                return response
+            if repairing:
+                self.repair_calls += 1
+                assert not tools
+            if not repairing or stay_wrong:
+                candidate = json.loads(response.content)
+                candidate["claims"][0]["value"]["passed"] = 999
+                response.content = json.dumps(candidate)
+            return response
+
+    executor = FixedFixtureExecutor(ArtifactStore(tmp_path), "task_repair", fixture_target("a"*40, "healthy"), "healthy")
+    provider = RepairProvider()
+    reserve = AsyncMock(return_value=True)
+    report = await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+        checkpoint=AsyncMock(), before_model=AsyncMock(), max_iterations=4, reserve_repair=reserve))
+    assert report["report_repair_attempted"] and provider.repair_calls == 1
+    assert report["report_validated"] is (not stay_wrong)
+    reserve.assert_awaited_once()
+    assert report["model_rounds"] == 3
+    assert executor.record is not None
+
+
+async def test_report_repair_crash_never_restores_mutating_tools(tmp_path):
+    class WrongProvider(ScriptedProvider):
+        async def chat(self, messages, **kwargs):
+            if any("REPAIR_REPORT_ONCE" in str(m.get("content", "")) for m in messages if m.get("role") == "user"):
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(id="forbidden", name="run_gateway_fixture", arguments={})])
+            response = await super().chat(messages, **kwargs)
+            if not response.tool_calls:
+                response.content = "invalid candidate"
+            return response
+
+    executor = FixedFixtureExecutor(ArtifactStore(tmp_path), "task_repair_crash", fixture_target("a"*40, "healthy"), "healthy")
+    invoke = AsyncMock(wraps=executor._execute)
+    executor._execute = invoke
+    snapshots = []
+
+    async def crash(body):
+        if body.get("report_repair") and body["phase"] == "awaiting_tools":
+            snapshots.append(json.loads(json.dumps(body)))
+            raise asyncio.CancelledError
+
+    provider = WrongProvider()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+            checkpoint=crash, before_model=AsyncMock(), max_iterations=4, reserve_repair=AsyncMock(return_value=True)))
+    with pytest.raises(SnapshotIncompatibleError):
+        await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+            checkpoint=AsyncMock(), before_model=AsyncMock(), max_iterations=4, restore=Transcript.model_validate(snapshots[0])))
+    invoke.assert_awaited_once()

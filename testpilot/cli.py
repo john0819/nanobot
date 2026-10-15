@@ -139,7 +139,9 @@ def serve(
                                      artifacts=artifact_factory(extension), identity=identity,
                                      require_approval=extension.require_approval, model_limit=extension.model_limit,
                                      knowledge=knowledge_client(extension, ledger.tenant_id),
-                                     target=target_factory(extension, runner_image), runner=runner_factory(extension))
+                                     target=target_factory(extension, runner_image), runner=runner_factory(extension),
+                                     max_active_tasks=extension.max_active_tasks, max_user_active_tasks=extension.max_user_active_tasks,
+                                     max_global_active_tasks=extension.max_global_active_tasks)
     else:
         service = create_app(tokens={token: Principal("local-reviewer")}, root=output,
                              executor_factory=executor, run=run)

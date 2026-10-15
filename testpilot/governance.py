@@ -27,7 +27,7 @@ class ApprovalDecision(Contract):
 
 class PlanStep(Contract):
     id: str = Field(pattern=r"^[a-z0-9_-]{1,40}$")
-    action: Literal["search_knowledge", "run_gateway_fixture", "inspect_result", "publish_report"]
+    action: Literal["search_knowledge", "run_gateway_fixture", "inspect_result", "publish_report", "request_input"]
     rationale: str = Field(min_length=1, max_length=500)
 
 
