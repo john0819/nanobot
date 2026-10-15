@@ -21,6 +21,8 @@ from testpilot.identity import AuthenticationError, IdentityProvider, StaticIden
 from testpilot.knowledge import MCPKnowledgeClient
 from testpilot.memory import MemoryRepository, verify_source
 from testpilot.openapi import document
+from testpilot.recoverable_runner import RetainedRunner
+from testpilot.runner_contracts import RunnerFactory
 from testpilot.scheduler import JobScheduler
 from testpilot.storage.postgres import (
     BudgetExhaustedError,
@@ -45,13 +47,14 @@ def create_app(
     require_approval: bool = False,
     knowledge: MCPKnowledgeClient | None = None,
     model_limit: int = 12,
+    runner: RunnerFactory = RetainedRunner,
 ) -> web.Application:
     if identity is None and (not tokens or any(len(token) < 32 or owner.tenant_id != ledger.tenant_id for token, owner in tokens.items())):
         raise ValueError("strong local identity tokens matching DB scope required")
     provider = identity or StaticIdentity(tokens)
     root = root.resolve()
-    pool = WorkerPool(ledger, root, image, run, workers, lease_seconds, poll_delay, artifacts, knowledge)
-    scheduler = JobScheduler(ledger, root, image, lease_seconds, poll_delay, artifacts)
+    pool = WorkerPool(ledger, root, image, run, workers, lease_seconds, poll_delay, artifacts, knowledge, runner)
+    scheduler = JobScheduler(ledger, root, image, lease_seconds, poll_delay, artifacts, runner)
 
     async def auth(request: web.Request) -> Principal:
         try:
@@ -76,6 +79,18 @@ def create_app(
         if task is None:
             raise web.HTTPNotFound(text="Task not found")
         return task
+
+    async def traces(request: web.Request) -> web.Response:
+        task = await get_task(request)
+        rows = await ledger.traces(task)
+        for row in rows:
+            row["created_at"] = row["created_at"].isoformat()
+        return web.json_response({"task_id": task.id, "run_id": task.run_id, "traces": rows})
+
+    async def metrics(request: web.Request) -> web.Response:
+        owner = await auth(request)
+        permission(owner, "reviewer")
+        return web.Response(text=await ledger.metrics(), content_type="text/plain")
 
     @web.middleware
     async def database_errors(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
@@ -379,6 +394,8 @@ def create_app(
     app.router.add_get("/v1/tasks/{task_id}/approval", approval)
     app.router.add_post("/v1/tasks/{task_id}/approval", decide)
     app.router.add_get("/v1/tasks/{task_id}/plan", plan)
+    app.router.add_get("/v1/tasks/{task_id}/traces", traces)
+    app.router.add_get("/metrics", metrics)
     app.on_startup.append(startup)
     app.on_cleanup.append(shutdown)
     return app

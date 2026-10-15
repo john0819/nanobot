@@ -6,7 +6,12 @@ from uuid import uuid4
 
 from testpilot.domain import PendingExecution
 from testpilot.memory import MemoryRepository
-from testpilot.recoverable_runner import RetainedRunner, UnknownDispatchError
+from testpilot.recoverable_runner import (
+    RetainedRunner,
+    RunnerQueryUnavailableError,
+    UnknownDispatchError,
+)
+from testpilot.runner_contracts import RunnerFactory
 from testpilot.storage.postgres import LeaseLostError, Ledger, TaskRow
 from testpilot.storage_contracts import ArtifactFactory, local_artifacts
 
@@ -14,12 +19,13 @@ from testpilot.storage_contracts import ArtifactFactory, local_artifacts
 class JobScheduler:
     def __init__(self, ledger: Ledger, root: Path, image: str,
                  lease_seconds: int = 30, poll_delay: float = 5,
-                 artifacts: ArtifactFactory = local_artifacts) -> None:
+                 artifacts: ArtifactFactory = local_artifacts, runner: RunnerFactory = RetainedRunner) -> None:
         if not 0.01 <= poll_delay <= 30 or not 1 <= lease_seconds <= 300:
             raise ValueError("invalid scheduler configuration")
         self.ledger, self.root, self.image = ledger, root.resolve(), image
         self.lease_seconds, self.poll_delay = lease_seconds, poll_delay
         self.artifacts = artifacts
+        self.runner = runner
         self.worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -78,7 +84,7 @@ class JobScheduler:
                     await self.ledger.finish(task, error="JOB_HANDLE_MISSING")
                 return
             store = self.artifacts(self.root, self.ledger.tenant_id, task.id)
-            backend = RetainedRunner(task, operation, store, self.image, self.root / "jobs" / self.ledger.tenant_id)
+            backend = self.runner(task, operation, store, self.image, self.root / "jobs" / self.ledger.tenant_id)
             polls, expired = await self.ledger.job_poll(task)
             if task.cancel_requested or expired:
                 try:
@@ -110,6 +116,10 @@ class JobScheduler:
             raise
         except LeaseLostError:
             pass
+        except RunnerQueryUnavailableError:
+            if operation:
+                await self.ledger.park(task, operation, PendingExecution(operation_id=operation.id,
+                    external_run_id=operation.external_id or "testpilot-"+operation.id), min(30, self.poll_delay*6))
         except Exception:
             try:
                 if operation:

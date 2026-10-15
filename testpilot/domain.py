@@ -15,7 +15,7 @@ class Target(Contract):
     commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     env_snapshot_id: str = Field(min_length=1)
     suite_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    source_revision_kind: Literal["WORKTREE_SNAPSHOT"] = "WORKTREE_SNAPSHOT"
+    source_revision_kind: Literal["WORKTREE_SNAPSHOT", "GIT_COMMIT"] = "WORKTREE_SNAPSHOT"
 
 
 class Counts(Contract):
@@ -56,7 +56,7 @@ class ExecutionRecord(Contract):
     junit_hash: str | None
     log_hash: str
     observed_at: str
-    source_system: Literal["trusted-local-fixture", "isolated-container-fixture"] = "trusted-local-fixture"
+    source_system: Literal["trusted-local-fixture", "isolated-container-fixture", "isolated-git-runner"] = "trusted-local-fixture"
 
 
 class Claim(Contract):

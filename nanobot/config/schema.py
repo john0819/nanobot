@@ -362,11 +362,17 @@ class TestPilotConfig(Base):
     """Explicit enterprise-extension settings; secrets never enter task/model context."""
 
     development: bool = True
+    tenant_id: str = Field(default="novax-demo", pattern=r"^[A-Za-z0-9_-]{1,64}$")
     require_approval: bool = False
     model_limit: int = Field(default=12, ge=4, le=40)
     jwt_issuer: str | None = None
     jwt_audience: str | None = None
     jwks_file: str | None = None
+    oidc_discovery: bool = False
+    oidc_jwks_ttl: int = Field(default=300, ge=5, le=3600)
+    oidc_introspection_url: str | None = None
+    oidc_client_id: str = ""
+    oidc_client_secret: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
     s3_endpoint: str | None = None
     s3_region: str = "garage"
     s3_bucket: str = "testpilot-artifacts"
@@ -374,13 +380,30 @@ class TestPilotConfig(Base):
     s3_secret_key: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
     knowledge_endpoint: str | None = None
     knowledge_actor_tokens: dict[str, SecretStr] = Field(default_factory=dict, repr=False)
+    git_repository: str | None = None
+    git_manifest: str | None = None
+    gitlab_endpoint: str | None = None
+    gitlab_project_id: int | None = Field(default=None, ge=1)
+    gitlab_job_id: int | None = Field(default=None, ge=1)
+    gitlab_token: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
+    runner_endpoint: str | None = None
+    runner_max_jobs: int = Field(default=4, ge=1, le=16)
+    runner_service_token: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
 
     @model_validator(mode="after")
     def complete_identity_and_storage(self) -> "TestPilotConfig":
-        if any((self.jwt_issuer, self.jwt_audience, self.jwks_file)) and not all((self.jwt_issuer, self.jwt_audience, self.jwks_file)):
+        if any((self.jwt_issuer, self.jwt_audience, self.jwks_file, self.oidc_discovery)) and not (self.jwt_issuer and self.jwt_audience and (self.jwks_file or self.oidc_discovery)):
             raise ValueError("JWT issuer/audience/JWKS must be configured together")
+        if self.oidc_discovery and self.jwks_file:
+            raise ValueError("Choose OIDC discovery or pinned JWKS file")
+        if self.oidc_introspection_url and not (self.oidc_discovery and self.oidc_client_id and self.oidc_client_secret.get_secret_value()):
+            raise ValueError("OIDC introspection requires explicit credentials")
         if self.s3_endpoint and not (self.s3_access_key.get_secret_value() and self.s3_secret_key.get_secret_value()):
             raise ValueError("S3 credentials required")
+        if self.runner_endpoint and len(self.runner_service_token.get_secret_value()) < 32:
+            raise ValueError("Remote Runner requires a strong explicit service credential")
+        if self.gitlab_endpoint and not (self.gitlab_project_id and self.git_manifest and self.gitlab_token.get_secret_value()):
+            raise ValueError("GitLab requires admitted project, manifest and credential")
         if not self.development and (not self.jwt_issuer or not self.s3_endpoint):
             raise ValueError("Shared profile requires verified identity and object storage")
         return self

@@ -11,6 +11,8 @@ from testpilot.artifacts import ArtifactStore
 from testpilot.demo_provider import ScriptedProvider
 from testpilot.execution import FixedFixtureExecutor, fixture_target
 from testpilot.nanobot_adapter import FixtureTool, candidate_text, private_checkpoint, run_task
+from testpilot.runtime_contracts import RunControls
+from testpilot.transcript import SnapshotIncompatibleError, Transcript
 
 
 def test_private_provider_checkpoint_is_json_and_never_public_text():
@@ -23,6 +25,38 @@ def test_private_provider_checkpoint_is_json_and_never_public_text():
     assert restored.payload == state.payload
     with pytest.raises(ValueError):
         private_checkpoint({"provider_state": object()})
+
+
+async def test_partial_tool_round_recovers_by_id_and_reuses_execution(tmp_path):
+    class BatchProvider(ScriptedProvider):
+        async def chat(self, messages, **kwargs):
+            if not any(message.get("role") == "tool" for message in messages):
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(id=name, name="run_gateway_fixture", arguments={}) for name in ("first", "second")])
+            return await super().chat(messages, **kwargs)
+
+    executor = FixedFixtureExecutor(ArtifactStore(tmp_path), "task_partial", fixture_target("a"*40, "healthy"), "healthy")
+    snapshots = []
+
+    async def crash_after_first(body):
+        if body.get("phase") == "partial_tools":
+            snapshots.append(json.loads(json.dumps(body)))
+            raise asyncio.CancelledError
+
+    provider = BatchProvider()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+            checkpoint=crash_after_first, before_model=AsyncMock(), max_iterations=4))
+    original = executor.record
+    snapshot = Transcript.model_validate(snapshots[0])
+    assert [m.get("tool_call_id") for m in snapshot.messages if m.get("role") == "tool"] == ["first"]
+    result = await run_task(executor, provider, provider.get_default_model(), controls=RunControls(
+        checkpoint=AsyncMock(), before_model=AsyncMock(), max_iterations=4, restore=snapshot))
+    assert result["report_validated"] and executor.record is original
+    before_model = AsyncMock()
+    with pytest.raises(SnapshotIncompatibleError):
+        await run_task(executor, provider, "changed-model", controls=RunControls(
+            checkpoint=AsyncMock(), before_model=before_model, max_iterations=4, restore=snapshot))
+    before_model.assert_not_called()
 
 
 def test_candidate_wrapper_does_not_repair_claims_or_extract_from_prose():

@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import Field
 
 from nanobot.agent.tools.base import Tool
+from testpilot.artifacts import MAX_ARTIFACT_BYTES
 from testpilot.context import tokens
 from testpilot.domain import Contract
 from testpilot.evidence import check_execution
@@ -72,7 +73,7 @@ class MemoryTool(Tool):
 
 class ArtifactRead(Contract):
     artifact_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    offset: int = Field(default=0, ge=0, le=4*1024*1024)
+    offset: int = Field(default=0, ge=0, le=MAX_ARTIFACT_BYTES)
     limit: int = Field(default=2000, ge=1, le=4000)
 
 

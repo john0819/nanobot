@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 
 
 class ArtifactUnavailableError(RuntimeError):
@@ -21,6 +21,7 @@ class ArtifactStore:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.root.chmod(0o700)
 
     def _path(self, content_hash: str) -> Path:
         if not re.fullmatch(r"[0-9a-f]{64}", content_hash):
@@ -37,7 +38,7 @@ class ArtifactStore:
         path = self._path(content_hash)
         temporary = self.root / (".pending-" + uuid4().hex)
         try:
-            with temporary.open("xb") as stream:
+            with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())

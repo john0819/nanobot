@@ -39,12 +39,13 @@ flowchart LR
 - `runner/`：独立执行镜像；运行前校验源码和独立 oracle hash，Docker socket/密钥不进入容器。
 - 固定 oracle 通过真实 HTTP 请求验证读重试、写不重试、路由优先级和限流；Gateway 对 Upstream 也发起真实请求。
 
-这是 **M0 + M1 本地固定目标纵切 + 模块 E 的首个可运行子集**。
-已实现 Task API、HTTP 被测 gateway 和独立容器 Runner；目标仍是工作树固定 fixture，
-第三批已接入 PostgreSQL 任务事实源及固定 Job crash recovery。
-第五批已接入 S3、JWT 身份、持久审批、Plan/Context 和任务级 RAG，并提供 `/console`。
-启动、权限和评测命令见 [治理 Runbook](governance-runbook.md)。企业 Git commit manifest、完整 OIDC、
-通用企业 Runner 与完整故障矩阵仍未完成，不能把本地固定目标验收当完整 M2–M5。
+当前已实现 PG 持久任务、审批/权限、S3、RAG、Memory、暂停/恢复、控制台，
+以及审核 Git commit manifest、独立 HTTP Runner 和版本化完整工具轮恢复。
+Runner 持久去重与槽位限制独立于 Agent；原始 transcript 私有存储，模型输入可按完整工具轮投影。
+OIDC 支持 discovery/JWKS 轮换和可选 introspection；GitLab commit/diff/CI 查询为只读背景证据。
+Trace/Prometheus 指标不含提示词/参数/密钥；登记产物可用 CLI 核对 hash。
+启动见 [企业 Adapter Runbook](enterprise-runbook.md)，权限/RAG 见 [治理 Runbook](governance-runbook.md)。
+这仍不代表 TRD 全部完成：逐项缺口及已验证范围见 [完整交付审计](completion-audit.md)。
 
 ## 运行
 
@@ -92,7 +93,7 @@ PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable`
 - [x] GitHub 展示入口与独立 TestPilot CI。
 - [x] 启动真实 nanobot Task API，脚本 Provider 和 DeepSeek 模型分别验证正常/缺陷任务。
 - [x] 容器隔离探针、取消后确认移除、重复/并发取消和禁止自动重发。
-- [ ] M1 企业目标接入：Git commit source manifest、服务端身份/环境快照、企业 Runner 契约。
+- [x] 企业目标执行子集：审核 Git commit/blob/manifest、镜像固定、独立 Runner HTTP 与真实隔离 pytest。
 - [x] M2 子集：PG Task/Run/Operation/Attempt、租约/fencing、Checkpoint、事件/outbox 同事务、原固定 Job 对账。
 - [x] 真实 nanobot SIGKILL/重启：原 Docker Job 数量=1、原请求幂等、预算和租约 epoch 保留。
 - [x] 外部等待释放 Worker、独立 Scheduler/Reconciler、原 Job 终态后才唤醒 Agent。
@@ -105,6 +106,10 @@ PG 恢复模式见 [持久执行 Runbook](postgres-runbook.md)，用 `--durable`
 - [x] 显式新 Run 复跑：原预算、新审批、未决操作拒绝、不可变旧报告和历史证据下载。
 - [x] 失败观察 Memory：候选/独立审核、个人与项目 scope、代码/环境匹配、TTL/撤销/版本审计与实际读取。
 - [x] 暂停/恢复/私有输入：版本 CAS、旧 Worker fencing、既有 Job 继续对账、输入去重与上下文投影。
+- [x] 完整工具轮恢复：按 tool_call_id 补齐、拒绝不确定写重放和 Runtime 快照漂移；原文私有不可变产物。
+- [x] OIDC discovery/JWKS 轮换/introspection、只读 GitLab commit/diff/CI 及 SHA 关联检查。
+- [x] 独立 Runner kill/restart 后原 Job 恢复；10 并发任务真实容器执行、报告验证与外部数量核对。
+- [x] 内容脱敏 Trace、权限保护指标、登记产物 hash 核对 CLI。
 - [ ] M2 完整验收：完整 F01–F05/F11–F13、GC 与版本化完整上下文恢复。
 - [ ] M3 完整验收：完整权限/取消故障矩阵、同 Run 多 suite 复跑、预算 amendment 和完整 Evidence 类型。
 - [ ] M4：task 级预算、Plan/Progress Guard/上下文、受治理的按需 RAG、真实模型评测。

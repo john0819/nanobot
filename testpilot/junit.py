@@ -4,10 +4,10 @@ from dataclasses import dataclass
 
 from defusedxml import ElementTree
 
-from testpilot.artifacts import MAX_ARTIFACT_BYTES
 from testpilot.domain import Counts
 
 PARSER_VERSION = "junit-v1"
+MAX_JUNIT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class ParsedJUnit:
 
 
 def parse_junit(content: bytes, expected_cases: tuple[str, ...]) -> ParsedJUnit:
-    if len(content) > MAX_ARTIFACT_BYTES:
+    if len(content) > MAX_JUNIT_BYTES:
         raise ValueError("JUnit exceeds size limit")
     if len(expected_cases) != len(set(expected_cases)):
         raise ValueError("duplicate planned case identity")

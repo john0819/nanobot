@@ -50,7 +50,7 @@ async def run(execution, controls):
 
 
 def app(ledger, tmp_path, **kwargs):
-    return create_app(tokens={TOKEN: Principal("alice", ledger.tenant_id)}, ledger=ledger,
+    return create_app(tokens=kwargs.pop("tokens", {TOKEN: Principal("alice", ledger.tenant_id)}), ledger=ledger,
                       root=tmp_path, image=IMAGE, target=lambda mode: target(ledger, mode),
                       run=kwargs.pop("run", run), workers=1, poll_delay=0.05, **kwargs)
 
@@ -76,7 +76,9 @@ ORIGINAL_SUBMIT = RetainedRunner.submit
 
 async def test_waiting_job_releases_only_agent_worker_and_saves_paired_checkpoint(ledger, tmp_path, monkeypatch):
     monkeypatch.setattr(RetainedRunner, "submit", pause_bug)
-    async with TestClient(TestServer(app(ledger, tmp_path))) as client:
+    reviewer_token = "reviewer-"+"x"*40
+    identities = {TOKEN: Principal("alice", ledger.tenant_id), reviewer_token: Principal("reviewer", ledger.tenant_id, ("reviewer",))}
+    async with TestClient(TestServer(app(ledger, tmp_path, tokens=identities))) as client:
         result = await client.post("/v1/tasks", json={"mode": "retry-write-bug"}, headers=HEADERS)
         first = (await result.json())["task_id"]
         waiting = await await_state(ledger, first, {"WAITING_EXTERNAL"})
@@ -85,7 +87,11 @@ async def test_waiting_job_releases_only_agent_worker_and_saves_paired_checkpoin
         operation = await ledger.find_operation(waiting)
         async with ledger.connection() as connection:
             cursor = await connection.execute("SELECT body FROM testpilot.checkpoints WHERE tenant_id=%s AND task_id=%s ORDER BY event_seq", (ledger.tenant_id, first))
-            bodies = [row["body"] for row in await cursor.fetchall()]
+            bodies = []
+            private_store = ArtifactStore(tmp_path/ledger.tenant_id/first/"artifacts")
+            for row in await cursor.fetchall():
+                body = row["body"]
+                bodies.append(json.loads(private_store.read(body["transcript_ref"])) if "transcript_ref" in body else body)
         complete = next(body for body in bodies if body.get("phase") == "tools_completed")
         assert complete["pending_tool_calls"] == []
         assert complete["completed_tool_results"][0]["tool_call_id"] == complete["assistant_message"]["tool_calls"][0]["id"]
@@ -94,6 +100,15 @@ async def test_waiting_job_releases_only_agent_worker_and_saves_paired_checkpoin
         response = await client.post("/v1/tasks", json={"mode": "healthy"}, headers=second_headers)
         second = (await response.json())["task_id"]
         assert (await await_state(ledger, second, {"COMPLETED", "NEEDS_REVIEW"})).state == "COMPLETED"
+        trace_response = await client.get(f"/v1/tasks/{second}/traces", headers=HEADERS)
+        assert trace_response.status == 200
+        traces = (await trace_response.json())["traces"]
+        assert {row["kind"] for row in traces} == {"MODEL_ROUND", "TOOL"}
+        assert all(set(row["attributes"]) == {"iteration", "tool_name"} for row in traces)
+        assert (await client.get("/metrics")).status == 401
+        assert (await client.get("/metrics", headers=HEADERS)).status == 403
+        metrics = await client.get("/metrics", headers={"Authorization": "Bearer "+reviewer_token})
+        assert metrics.status == 200 and "testpilot_trace_observations" in await metrics.text()
         still_waiting = await ledger.get(first, "alice")
         assert still_waiting.state in {"WAITING_EXTERNAL", "RECONCILING"} and still_waiting.model_rounds == 1
         await docker("unpause", "testpilot-" + operation.id)

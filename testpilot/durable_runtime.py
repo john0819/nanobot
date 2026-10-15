@@ -19,6 +19,7 @@ from testpilot.knowledge import KnowledgeUnavailableError, MCPKnowledgeClient, e
 from testpilot.memory import MemoryRepository, verify_source
 from testpilot.progress import ProgressStalledError
 from testpilot.recoverable_runner import RetainedRunner, UnknownDispatchError
+from testpilot.runner_contracts import RunnerBackend, RunnerFactory
 from testpilot.runtime_contracts import RunControls, RuntimeYieldError
 from testpilot.storage.postgres import (
     BudgetExhaustedError,
@@ -28,13 +29,14 @@ from testpilot.storage.postgres import (
     TaskRow,
 )
 from testpilot.storage_contracts import ArtifactFactory, local_artifacts
+from testpilot.transcript import SnapshotIncompatibleError, Transcript
 
 DurableTaskRunner = Callable[["DurableExecutor", RunControls], Awaitable[dict[str, object]]]
 
 
 class DurableExecutor:
     def __init__(self, ledger: Ledger, task: TaskRow, operation: OperationRow,
-                 store: ArtifactStore, backend: RetainedRunner, lease_seconds: int = 30,
+                 store: ArtifactStore, backend: RunnerBackend, lease_seconds: int = 30,
                  asynchronous: bool = False) -> None:
         self.ledger, self.task, self.operation = ledger, task, operation
         self.store, self.backend = store, backend
@@ -83,7 +85,8 @@ class DurableExecutor:
 class WorkerPool:
     def __init__(self, ledger: Ledger, root: Path, image: str, run: DurableTaskRunner,
                  workers: int = 2, lease_seconds: int = 30, poll_delay: float = 5,
-                 artifacts: ArtifactFactory = local_artifacts, knowledge: MCPKnowledgeClient | None = None) -> None:
+                 artifacts: ArtifactFactory = local_artifacts, knowledge: MCPKnowledgeClient | None = None,
+                 runner: RunnerFactory = RetainedRunner) -> None:
         if not 1 <= workers <= 4 or not 1 <= lease_seconds <= 300:
             raise ValueError("invalid worker configuration")
         self.ledger, self.root, self.image, self.run = ledger, root.resolve(), image, run
@@ -91,6 +94,7 @@ class WorkerPool:
         self.poll_delay = poll_delay
         self.artifacts = artifacts
         self.knowledge = knowledge
+        self.runner = runner
         self._tasks: list[asyncio.Task[None]] = []
         self.stopping = False
         self._active: dict[str, asyncio.Task[None]] = {}
@@ -132,7 +136,7 @@ class WorkerPool:
         self._active[task.id] = current
         lost = False
         cancel = task.cancel_requested
-        backend: RetainedRunner | None = None
+        backend: RunnerBackend | None = None
         executor: DurableExecutor | None = None
         operation: OperationRow | None = None
 
@@ -169,12 +173,23 @@ class WorkerPool:
             store = self.artifacts(self.root, self.ledger.tenant_id, task.id)
             operation = await self.ledger.find_operation(task) if cancel else await self.ledger.operation(task)
             if operation is not None:
-                backend = RetainedRunner(task, operation, store, self.image, self.root / "jobs" / self.ledger.tenant_id)
+                backend = self.runner(task, operation, store, self.image, self.root / "jobs" / self.ledger.tenant_id)
                 executor = DurableExecutor(self.ledger, task, operation, store, backend, self.lease_seconds, asynchronous=True)
             if cancel:
                 await cleanup_cancel()
                 return
             assert executor is not None
+            reference = await self.ledger.transcript_ref(task)
+            restored = Transcript.model_validate_json(await asyncio.to_thread(store.read, reference)) if reference else None
+
+            async def checkpoint(body: dict[str, object]) -> None:
+                if "messages" not in body:
+                    await self.ledger.checkpoint(task, body)
+                    return
+                content = json.dumps(body, ensure_ascii=False).encode()
+                ref = await asyncio.to_thread(store.put, content)
+                await self.ledger.checkpoint(task, {"phase": body.get("phase", "unknown"), "schema_version": 2,
+                                                   "transcript_ref": ref, "runtime_fingerprint": body.get("runtime_fingerprint")})
             async def search(query: str):
                 if self.knowledge is None:
                     raise KnowledgeUnavailableError("Knowledge connection not configured")
@@ -189,7 +204,7 @@ class WorkerPool:
                 if isinstance(observation, PendingExecution):
                     raise RuntimeYieldError(observation)
             remaining = ((task.activated_at or task.created_at) + timedelta(seconds=120) - datetime.now(timezone.utc)).total_seconds()
-            if remaining <= 0 or task.model_rounds >= task.model_limit:
+            if remaining <= 0 or (task.model_rounds >= task.model_limit and not (restored and restored.phase == "final_response")):
                 raise BudgetExhaustedError("task budget exhausted")
             latest_plan = await self.ledger.latest_plan(task)
             context_blocks = (ContextBlock(block_id="task", kind="TASK", text=json.dumps({
@@ -224,7 +239,7 @@ class WorkerPool:
                 return verified
 
             controls = RunControls(
-                checkpoint=lambda body: self.ledger.checkpoint(task, body),
+                checkpoint=checkpoint,
                 before_model=lambda: self.ledger.reserve_round(task),
                 max_iterations=task.model_limit-task.model_rounds,
                 progress=lambda fingerprints: self.ledger.progress(task, fingerprints),
@@ -237,6 +252,8 @@ class WorkerPool:
                 before_action=lambda: self.ledger.guard_action(task),
                 inputs=inputs,
                 mark_inputs=lambda ids: self.ledger.consume_inputs(task, ids),
+                restore=restored,
+                trace=lambda record: self.ledger.record_trace(task, record),
             )
             report = await asyncio.wait_for(self.run(executor, controls), remaining)
             fresh = await self.ledger.heartbeat(task, self.lease_seconds)
@@ -285,7 +302,7 @@ class WorkerPool:
                         # Cannot verify remote evidence; publish no test counts and still terminate safely.
                         report = build_report(task_id=task.id, target=task.target, record=None,
                                               store=executor.store, candidate_json=None, runner_stop_reason="interrupted")
-                    code = "ARTIFACT_UNAVAILABLE" if isinstance(error, ArtifactUnavailableError) else "KNOWLEDGE_UNAVAILABLE" if isinstance(error, KnowledgeUnavailableError) else "CONTEXT_BUDGET" if isinstance(error, ContextBudgetError) else "PROGRESS_STALLED" if isinstance(error, ProgressStalledError) else "OPERATION_UNKNOWN" if isinstance(error, UnknownDispatchError) else "TASK_BUDGET" if isinstance(error, (BudgetExhaustedError, TimeoutError)) else "TASK_EXECUTION_UNRESOLVED"
+                    code = "SNAPSHOT_INCOMPATIBLE" if isinstance(error, SnapshotIncompatibleError) else "ARTIFACT_UNAVAILABLE" if isinstance(error, ArtifactUnavailableError) else "KNOWLEDGE_UNAVAILABLE" if isinstance(error, KnowledgeUnavailableError) else "CONTEXT_BUDGET" if isinstance(error, ContextBudgetError) else "PROGRESS_STALLED" if isinstance(error, ProgressStalledError) else "OPERATION_UNKNOWN" if isinstance(error, UnknownDispatchError) else "TASK_BUDGET" if isinstance(error, (BudgetExhaustedError, TimeoutError)) else "TASK_EXECUTION_UNRESOLVED"
                     await self.ledger.finish(task, report, code)
                 else:
                     await self.ledger.finish(task, error="CANCELLATION_UNCONFIRMED" if cancel else "TARGET_OR_RUNTIME_INCOMPATIBLE")

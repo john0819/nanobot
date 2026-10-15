@@ -19,6 +19,7 @@ from testpilot.execution import FixtureMode
 from testpilot.governance import ApprovalDeniedError, TaskPlan, execution_hash
 from testpilot.knowledge import KnowledgeEvidence, KnowledgeResult
 from testpilot.progress import ProgressStalledError, ProgressState, advance
+from testpilot.telemetry import TraceRecord
 
 PROJECT = "gateway-fixture"
 
@@ -275,6 +276,17 @@ class Ledger:
                 raise LeaseLostError("Agent action not admitted")
             await self._deadline(connection, fresh)
 
+    async def authorize_runner(self, connection: AsyncConnection[dict[str, Any]], task: TaskRow,
+                               operation: OperationRow) -> tuple[TaskRow, OperationRow]:
+        self._operation_scope(task, operation)
+        fresh = await self._fence(connection, task)
+        cursor = await connection.execute("SELECT * FROM testpilot.operations WHERE tenant_id=%s AND project_id=%s AND id=%s AND task_id=%s AND run_id=%s", (self.tenant_id, fresh.project_id, operation.id, fresh.id, fresh.run_id))
+        row = await cursor.fetchone()
+        if fresh.state != "RUNNING" or fresh.cancel_requested or fresh.target != task.target or fresh.mode != task.mode or row is None or row["state"] != "DISPATCHING":
+            raise LeaseLostError("Runner dispatch not authorized")
+        await self._deadline(connection, fresh)
+        return fresh, OperationRow.model_validate(row)
+
     async def control(self, task_id: str, actor: str, expected_version: int, resume: bool) -> TaskRow:
         async with self.connection() as connection:
             cursor = await connection.execute("SELECT * FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s AND id=%s AND actor_id=%s FOR UPDATE", (self.tenant_id, PROJECT, task_id, actor))
@@ -356,6 +368,56 @@ class Ledger:
             await self._fence(connection, task)
             sequence = await self._event(connection, task, "checkpoint.saved", {"phase": str(body.get("phase", "unknown"))})
             await connection.execute("INSERT INTO testpilot.checkpoints (tenant_id,project_id,task_id,run_id,event_seq,body) VALUES (%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, task.id, task.run_id, sequence, Jsonb(body)))
+            if body.get("transcript_ref"):
+                await self._artifact(connection, task, str(body["transcript_ref"]), "PRIVATE_TRANSCRIPT")
+            if body.get("integration_ref"):
+                await self._artifact(connection, task, str(body["integration_ref"]), "PRIVATE_INTEGRATION")
+
+    async def _artifact(self, connection: AsyncConnection[dict[str, Any]], task: TaskRow, ref: str, kind: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", ref):
+            raise ValueError("Invalid artifact reference")
+        await connection.execute("INSERT INTO testpilot.artifact_catalog (tenant_id,project_id,task_id,run_id,hash,kind) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (self.tenant_id, PROJECT, task.id, task.run_id, ref, kind))
+
+    async def record_trace(self, task: TaskRow, record: TraceRecord) -> None:
+        async with self.connection() as connection:
+            await self._fence(connection, task)
+            await connection.execute("INSERT INTO testpilot.trace_records (tenant_id,project_id,task_id,run_id,kind,duration_ms,input_tokens,output_tokens,attributes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, task.id, task.run_id, record.kind, record.duration_ms, record.input_tokens, record.output_tokens, Jsonb(record.attributes())))
+
+    async def traces(self, task: TaskRow) -> list[dict[str, Any]]:
+        async with self.connection() as connection:
+            cursor = await connection.execute("SELECT id,kind,duration_ms,input_tokens,output_tokens,attributes,created_at FROM testpilot.trace_records WHERE tenant_id=%s AND project_id=%s AND run_id=%s ORDER BY id LIMIT 2000", (self.tenant_id, PROJECT, task.run_id))
+            return await cursor.fetchall()
+
+    async def metrics(self) -> str:
+        async with self.connection() as connection:
+            cursor = await connection.execute("SELECT kind,count(*) AS observations,sum(duration_ms)/1000 AS seconds,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens FROM testpilot.trace_records WHERE tenant_id=%s AND project_id=%s GROUP BY kind ORDER BY kind", (self.tenant_id, PROJECT))
+            rows = await cursor.fetchall()
+            cursor = await connection.execute("SELECT state,count(*) AS tasks FROM testpilot.tasks WHERE tenant_id=%s AND project_id=%s GROUP BY state ORDER BY state", (self.tenant_id, PROJECT))
+            states = await cursor.fetchall()
+        lines = ["# TYPE testpilot_trace_observations gauge", "# TYPE testpilot_trace_seconds gauge",
+                 "# TYPE testpilot_input_tokens gauge", "# TYPE testpilot_output_tokens gauge", "# TYPE testpilot_tasks gauge"]
+        for row in rows:
+            kind = str(row["kind"])
+            if kind not in {"MODEL_ROUND", "TOOL"}:
+                continue
+            for metric, column in (("trace_observations", "observations"), ("trace_seconds", "seconds"), ("input_tokens", "input_tokens"), ("output_tokens", "output_tokens")):
+                lines.append(f'testpilot_{metric}{{kind="{kind}"}} {float(row[column])}')
+        for row in states:
+            state = str(row["state"])
+            if re.fullmatch(r"[A-Z_]{1,32}", state):
+                lines.append(f'testpilot_tasks{{state="{state}"}} {int(row["tasks"])}')
+        return "\n".join(lines)+"\n"
+
+    async def artifact_inventory(self, task: TaskRow) -> list[dict[str, Any]]:
+        async with self.connection() as connection:
+            cursor = await connection.execute("SELECT hash,kind,run_id FROM testpilot.artifact_catalog WHERE tenant_id=%s AND project_id=%s AND task_id=%s AND deleted_at IS NULL ORDER BY run_id,hash", (self.tenant_id, PROJECT, task.id))
+            return await cursor.fetchall()
+
+    async def transcript_ref(self, task: TaskRow) -> str | None:
+        async with self.connection() as connection:
+            cursor = await connection.execute("SELECT body->>'transcript_ref' AS ref FROM testpilot.checkpoints WHERE tenant_id=%s AND project_id=%s AND run_id=%s AND body ? 'transcript_ref' ORDER BY event_seq DESC LIMIT 1", (self.tenant_id, PROJECT, task.run_id))
+            row = await cursor.fetchone()
+            return str(row["ref"]) if row else None
 
     async def expire_approvals(self) -> int:
         """Bounded scheduler sweep, row-locked against concurrent decisions and cancellation."""
@@ -489,6 +551,9 @@ class Ledger:
                 return  # A terminal result must never be overwritten or announced as UNKNOWN by a late attempt.
             if record:
                 await connection.execute("UPDATE testpilot.attempts SET dispatch_certainty='SENT',ended_at=clock_timestamp() WHERE tenant_id=%s AND project_id=%s AND operation_id=%s", (self.tenant_id, PROJECT, operation.id))
+                for ref, kind in ((record.junit_hash, "JUNIT"), (record.log_hash, "PRIVATE_LOG")):
+                    if ref:
+                        await self._artifact(connection, task, ref, kind)
             await connection.execute("UPDATE testpilot.external_jobs SET state=%s WHERE tenant_id=%s AND project_id=%s AND operation_id=%s", (state, self.tenant_id, PROJECT, operation.id))
             sequence = await self._event(connection, task, "operation." + state.lower(), {"operation_id": operation.id})
             await connection.execute("INSERT INTO testpilot.checkpoints (tenant_id,project_id,task_id,run_id,event_seq,body) VALUES (%s,%s,%s,%s,%s,%s)", (self.tenant_id, PROJECT, task.id, task.run_id, sequence, Jsonb({"phase": "operation_result", "operation_id": operation.id, "state": state})))
@@ -541,6 +606,10 @@ class Ledger:
         async with self.connection() as connection:
             await self._fence(connection, task)
             await connection.execute("UPDATE testpilot.operations SET state=CASE WHEN state='SUCCEEDED' THEN state ELSE 'CANCELLED' END,result=COALESCE(result,%s) WHERE tenant_id=%s AND project_id=%s AND id=%s", (Jsonb(record.model_dump(mode="json")) if record else None, self.tenant_id, PROJECT, operation.id))
+            if record:
+                for ref, kind in ((record.junit_hash, "JUNIT"), (record.log_hash, "PRIVATE_LOG")):
+                    if ref:
+                        await self._artifact(connection, task, ref, kind)
             await self._event(connection, task, "operation.cancel_resolved", {"operation_id": operation.id})
             await connection.execute("UPDATE testpilot.external_jobs SET state=CASE WHEN state='SUCCEEDED' THEN state ELSE 'CANCELLED' END WHERE tenant_id=%s AND project_id=%s AND operation_id=%s", (self.tenant_id, PROJECT, operation.id))
 
@@ -642,6 +711,10 @@ class Ledger:
         plan.validate_scope()
         async with self.connection() as connection:
             await self._fence(connection, task)
+            cursor = await connection.execute("SELECT version,body FROM testpilot.plans WHERE tenant_id=%s AND project_id=%s AND run_id=%s ORDER BY version DESC LIMIT 1", (self.tenant_id, PROJECT, task.run_id))
+            previous = await cursor.fetchone()
+            if previous and previous["body"] == plan.model_dump(mode="json"):
+                return int(previous["version"])
             cursor = await connection.execute("SELECT COALESCE(max(version),0) AS version FROM testpilot.plans WHERE tenant_id=%s AND project_id=%s AND run_id=%s", (self.tenant_id, PROJECT, task.run_id))
             row = await cursor.fetchone()
             assert row is not None
@@ -664,6 +737,7 @@ class Ledger:
         async with self.connection() as connection:
             await self._fence(connection, task)
             await connection.execute("INSERT INTO testpilot.knowledge_evidence (tenant_id,project_id,task_id,run_id,evidence_id,query_hash,body) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (self.tenant_id, PROJECT, task.id, task.run_id, item.evidence_id, item.query_hash, Jsonb(item.model_dump(mode="json"))))
+            await self._artifact(connection, task, item.artifact_hash, "PRIVATE_KNOWLEDGE")
             await self._event(connection, task, "knowledge.retrieved", {"evidence_id": item.evidence_id, "citation_count": len(result.citations), "degraded": list(result.degraded)})
 
     async def knowledge_artifacts(self, task: TaskRow) -> list[str]:

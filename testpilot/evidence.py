@@ -112,7 +112,7 @@ def build_report(
         "run_id": record.run_id if record else None,
         "external_run_id": record.external_run_id if record else None,
         "operation_id": record.operation_id if record else None,
-        "completed_actions": ["fixed_fixture_pytest"] if parsed else [],
+        "completed_actions": (["reviewed_git_pytest"] if target.source_revision_kind == "GIT_COMMIT" else ["fixed_fixture_pytest"]) if parsed else [],
         "test_summary": ({**counts.model_dump(), "executed": counts.executed,
                           "pass_rate": counts.pass_rate} if counts else None),
         "findings": [{"category": "UNKNOWN", "case_id": case,
@@ -120,10 +120,10 @@ def build_report(
                       "limitations": ["失败已复现；不能由单次结果确认产品缺陷或归因。"]}
                      for case in parsed.failed_cases] if parsed else [],
         "claims": statuses, "validation_gaps": gaps,
-        "limitations": ["仅覆盖固定网关策略 fixture，不代表企业项目回归或代码覆盖率。",
-                        "目标为工作树快照：commit_sha 记录 fork 基线，suite_hash 绑定实际源码与断言。",
+        "limitations": [("仅覆盖审核 manifest 声明的 suite，不代表全项目覆盖率。" if target.source_revision_kind == "GIT_COMMIT" else "仅覆盖固定网关策略 fixture，不代表企业项目回归或代码覆盖率。"),
+                        ("目标绑定真实 Git commit、只读 blob hash、审核 suite 和隔离镜像。" if target.source_revision_kind == "GIT_COMMIT" else "目标为工作树快照：commit_sha 记录 fork 基线，suite_hash 绑定实际源码与断言。"),
                         ("独立隔离容器执行固定 HTTP suite；不开放生成代码，也不提供持久任务恢复。"
-                         if record and record.source_system == "isolated-container-fixture"
+                         if record and record.source_system in {"isolated-container-fixture", "isolated-git-runner"}
                          else "本地执行器仅执行审核过的固定源码；不提供生成代码隔离或持久恢复。"),
                         "未验证真实 LLM 自主规划效果，RAG 本次未参与执行证据判定。"],
         "artifact_refs": [h for h in (record.junit_hash, record.log_hash) if h] if record else [],

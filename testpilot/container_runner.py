@@ -21,6 +21,8 @@ def container_target(commit_sha: str, mode: FixtureMode, image: str, tenant_id: 
 
 
 class ContainerFixtureExecutor:
+    expected_cases: tuple[str, ...] = EXPECTED_CASES
+    source_system: Literal["isolated-container-fixture", "isolated-git-runner"] = "isolated-container-fixture"
     """No generated code or Docker socket enters the container.
 
     Agent tools cannot choose images, host mounts, command lines or network targets.

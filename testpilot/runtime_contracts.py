@@ -5,8 +5,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from testpilot.domain import PendingExecution
+from testpilot.git_source import GitSource
+from testpilot.gitlab import GitLabAdapter
 from testpilot.governance import TaskPlan
 from testpilot.knowledge import KnowledgeResult
+from testpilot.telemetry import TraceRecord
+from testpilot.transcript import Transcript
 
 
 class RuntimeYieldError(RuntimeError):
@@ -32,3 +36,7 @@ class RunControls:
     before_action: Callable[[], Awaitable[None]] | None = None
     inputs: Callable[[], Awaitable[list[dict[str, object]]]] | None = None
     mark_inputs: Callable[[list[str]], Awaitable[None]] | None = None
+    restore: Transcript | None = None
+    trace: Callable[[TraceRecord], Awaitable[None]] | None = None
+    git_source: GitSource | None = None
+    gitlab: GitLabAdapter | None = None

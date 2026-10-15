@@ -76,6 +76,9 @@ def document(durable: bool = False) -> dict[str, object]:
                 "200": response("Cancellation resolved or terminal state unchanged"),
                 **({"202": response("Cancellation intent persisted; query until cleanup is confirmed")} if durable else {}),
                 "401": error, "404": error}}},
+            **({"/v1/tasks/{task_id}/traces": {"get": {"parameters": [task_id], "responses": {
+                "200": response("Owner-scoped content-free model/tool traces"), "401": error, "404": error}}}} if durable else {}),
+            **({"/metrics": {"get": {"responses": {"200": response("Reviewer-authorized project-scoped Prometheus gauges"), "401": error, "403": error}}}} if durable else {}),
             "/v1/tasks/{task_id}/artifacts/{hash}": {"get": {
                 "parameters": [task_id, {"name": "hash", "in": "path", "required": True,
                                         "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}],

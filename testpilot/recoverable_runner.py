@@ -11,12 +11,16 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from testpilot.artifacts import MAX_ARTIFACT_BYTES, ArtifactStore
 from testpilot.container_runner import ContainerFixtureExecutor
 from testpilot.domain import ExecutionRecord, PendingExecution
-from testpilot.execution import EXPECTED_CASES
+from testpilot.runner_contracts import RunnerProfile
 from testpilot.storage.postgres import OperationRow, TaskRow
 
 
 class UnknownDispatchError(RuntimeError):
     pass
+
+
+class RunnerQueryUnavailableError(UnknownDispatchError):
+    """Query temporarily unavailable. Keep bounded query-only recovery; never invoke again."""
 
 
 class JobState(BaseModel):
@@ -42,7 +46,15 @@ async def docker(*arguments: str, required: bool = True) -> bytes:
         "docker", *arguments, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), 10)
+        assert process.stdout is not None
+        chunks = bytearray()
+        async with asyncio.timeout(10):
+            while chunk := await process.stdout.read(65536):
+                chunks.extend(chunk)
+                if len(chunks) > MAX_ARTIFACT_BYTES:
+                    raise UnknownDispatchError("Runner output exceeds artifact bound")
+            await process.wait()
+        stdout = bytes(chunks)
     except BaseException:
         if process.returncode is None:
             process.kill()
@@ -61,11 +73,11 @@ class RetainedRunner:
     """
 
     def __init__(self, task: TaskRow, operation: OperationRow, store: ArtifactStore,
-                 image: str, scratch: Path) -> None:
+                 image: str, scratch: Path, profile: RunnerProfile | None = None) -> None:
         if not re.fullmatch(r"op_[0-9a-f]{32}", operation.id):
             raise ValueError("invalid operation ID")
         self.task, self.operation, self.store = task, operation, store
-        self.profile = ContainerFixtureExecutor(store, task.id, task.target, task.mode, image, scratch)
+        self.profile: RunnerProfile = profile or ContainerFixtureExecutor(store, task.id, task.target, task.mode, image, scratch)
         self.profile.operation_id = operation.id
         self.profile.container_name = "testpilot-" + operation.id
         self.name = self.profile.container_name
@@ -101,7 +113,7 @@ class RetainedRunner:
 
     async def submit(self) -> ExecutionRecord | PendingExecution:
         self.note_dispatch()
-        command = self.profile.command(self.output)[1:]
+        command = (await asyncio.to_thread(self.profile.command, self.output))[1:]
         command.remove("--rm")
         command.insert(1, "--detach")
         # run creates the unique name atomically; a conflict is reconciled, never started again.
@@ -147,9 +159,9 @@ class RetainedRunner:
         return ExecutionRecord(
             evidence_id="ev_" + self.operation.id[3:], task_id=self.task.id, run_id=self.task.run_id,
             external_run_id=job.Id, operation_id=self.operation.id, target=self.task.target,
-            state="COMPLETED", exit_code=job.State.ExitCode, expected_cases=EXPECTED_CASES,
+            state="COMPLETED", exit_code=job.State.ExitCode, expected_cases=self.profile.expected_cases,
             junit_hash=content_hash, log_hash=log_hash,
-            observed_at=datetime.now(timezone.utc).isoformat(), source_system="isolated-container-fixture",
+            observed_at=datetime.now(timezone.utc).isoformat(), source_system=self.profile.source_system,
         )
 
     async def cancel(self) -> ExecutionRecord | None:
